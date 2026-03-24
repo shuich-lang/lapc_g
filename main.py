@@ -223,38 +223,33 @@ class UniversalCrawler:
         return 1
 
     @staticmethod
-    async def go_to_page(page: Page, next_page: int) -> bool:
-        """지능형 다음 페이지 이동 알고리즘"""
+    async def go_to_page(page: Page, next_page: int, paging_sel: str, next_btn_sel: str) -> bool:
+        """지능형 다음 페이지 이동 (외부 주입 셀렉터 사용)"""
         try:
-            # 1. 전자정부표준프레임워크 (관공서 90% 이상) JS 직접 실행
-            is_egov = await page.evaluate("typeof fn_egov_link_page === 'function'")
-            if is_egov:
+            # 1. 전자정부 프레임워크 (JS 방식)
+            if await page.evaluate("typeof fn_egov_link_page === 'function'"):
                 await page.evaluate(f"fn_egov_link_page({next_page});")
                 await page.wait_for_load_state("domcontentloaded")
                 return True
-        except:
-            pass
+        except: pass
         
         try:
-            # 2. 직접 <a> 태그 텍스트 매칭해서 클릭 (GET 링크나 일반 onclick 대응)
-            # 정확히 숫자만 있는 링크를 찾음
-            link = page.locator("div.pagination a, div.paging a, #pagingNav a").filter(has_text=re.compile(f"^{next_page}$")).first
+            # 2. 직접 <a> 태그 클릭 방식 (외부 주입 셀렉터)
+            link = page.locator(f"{paging_sel} a").filter(has_text=re.compile(f"^{next_page}$")).first
             
             if await link.count() > 0:
-                # 해당 숫자가 안 보이면 (예: 11페이지로 가야하는데 현재 1~10만 보임) '다음' 버튼 클릭
+                # 다음 번호가 화면에 안 보이면 '다음(Next)' 버튼 클릭
                 if not await link.is_visible():
-                    next_block_btn = page.locator(".num_right, .next, [title='다음']").first
-                    if await next_block_btn.count() > 0:
-                        await next_block_btn.click()
+                    next_block = page.locator(next_btn_sel).first
+                    if await next_block.count() > 0:
+                        await next_block.click()
                         await page.wait_for_load_state("domcontentloaded")
-                        
-                # 버튼이 보이면 클릭
+                
+                # 번호 클릭
                 await link.click()
                 await page.wait_for_load_state("domcontentloaded")
                 return True
-        except:
-            pass
-            
+        except: pass
         return False
 
     @staticmethod
@@ -310,7 +305,9 @@ async def api_scrape_list(
     url: str = Query(..., description="의회 리스트 URL"), 
     rasmbly_numpr: str = Query("9", description="대수 (예: 9)"), 
     listClass: str = Query("stable", description="리스트 테이블 클래스"),
-    max_pages: int = Query(0, description="0이면 전체 페이지 자동 수집, 숫자면 해당 페이지까지만")
+    max_pages: int = Query(0, description="0이면 전체 페이지 자동 수집, 숫자면 해당 페이지까지만"),
+    pagingSelector: str = Query(".pagination, .paging, #pagingNav", description="페이징 영역 클래스"),
+    nextBtnSelector: str = Query(".num_right, .next, [title='다음'], .btn-next", description="다음 페이지 블록 버튼 클래스")
 ):
     app.state.stop_scraping = False 
     domain = extract_domain(url)
@@ -340,7 +337,7 @@ async def api_scrape_list(
                 
                 # 다음 페이지로 이동
                 if current_page < target_pages:
-                    moved = await UniversalCrawler.go_to_page(page, current_page + 1)
+                    moved = await UniversalCrawler.go_to_page(page, current_page + 1, pagingSelector, nextBtnSelector)
                     if not moved:
                         print(f"[!] {current_page + 1} 페이지로 이동 실패. 수집을 종료합니다.")
                         break
@@ -378,7 +375,9 @@ async def api_scrape_view(
     rasmbly_numpr: str = Query("9", description="대수 (예: 9)"),
     listClass: str = Query("stable", description="리스트 테이블 클래스"),
     viewClass: str = Query("board_view", description="상세 테이블 클래스"),
-    max_pages: str = Query("", description="공백 또는 0이면 전체 페이지 자동 수집, 숫자면 해당 페이지까지만")
+    max_pages: str = Query("", description="공백 또는 0이면 전체 페이지 자동 수집, 숫자면 해당 페이지까지만"),
+    pagingSelector: str = Query(".pagination, .paging, #pagingNav", description="페이징 영역 클래스"),
+    nextBtnSelector: str = Query(".num_right, .next, [title='다음'], .btn-next", description="다음 페이지 블록 버튼 클래스")
 ):
     app.state.stop_scraping = False
     domain = extract_domain(url)
@@ -420,7 +419,7 @@ async def api_scrape_view(
                 list_data.extend(items) # all_data가 아닌 list_data에 저장
                 
                 if current_page < target_pages:
-                    moved = await UniversalCrawler.go_to_page(page, current_page + 1)
+                    moved = await UniversalCrawler.go_to_page(page, current_page + 1, pagingSelector, nextBtnSelector)
                     if not moved: break
 
             # 2. 추출된 ID를 기반으로 뷰 페이지를 순차 수집하여 병합합니다.
