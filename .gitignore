@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# 다운로드 데이터 (크롤링 결과물)
+download/
+
+# 에디터
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
