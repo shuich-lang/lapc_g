@@ -96,7 +96,7 @@ class UniversalCrawler:
                 text = clean_text(await btn.inner_text()) or clean_text(await btn.get_attribute("value"))
                 if text and ("검색" in text or "조회" in text):
                     await btn.click()
-                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_load_state("domcontentloaded")
                     print("[+] 검색 버튼 클릭 완료", flush=True)
                     break
         except Exception as e:
@@ -230,7 +230,7 @@ class UniversalCrawler:
             is_egov = await page.evaluate("typeof fn_egov_link_page === 'function'")
             if is_egov:
                 await page.evaluate(f"fn_egov_link_page({next_page});")
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded")
                 return True
         except:
             pass
@@ -246,11 +246,11 @@ class UniversalCrawler:
                     next_block_btn = page.locator(".num_right, .next, [title='다음']").first
                     if await next_block_btn.count() > 0:
                         await next_block_btn.click()
-                        await page.wait_for_load_state("networkidle")
+                        await page.wait_for_load_state("domcontentloaded")
                         
                 # 버튼이 보이면 클릭
                 await link.click()
-                await page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded")
                 return True
         except:
             pass
@@ -320,7 +320,7 @@ async def api_scrape_list(
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await UniversalCrawler.apply_filter_and_search(page, rasmbly_numpr)
             
             # 💡 [핵심] 전체 페이지 수 자동 감지
@@ -378,37 +378,61 @@ async def api_scrape_view(
     rasmbly_numpr: str = Query("9", description="대수 (예: 9)"),
     listClass: str = Query("stable", description="리스트 테이블 클래스"),
     viewClass: str = Query("board_view", description="상세 테이블 클래스"),
-    max_pages: int = Query(0, description="0이면 전체 페이지 자동 수집, 숫자면 해당 페이지까지만")
+    max_pages: str = Query("", description="공백 또는 0이면 전체 페이지 자동 수집, 숫자면 해당 페이지까지만")
 ):
+    app.state.stop_scraping = False
     domain = extract_domain(url)
-    all_data = []
+    
+    # 💡 [핵심 수정 1] 리스트 수집용 배열과 최종 뷰 데이터용 배열을 분리
+    list_data = []
+    view_data_list = []
+
+    # 파라미터 방어 로직 (문자열이나 공백을 안전한 정수로 변환)
+    safe_max_pages = int(max_pages.strip()) if max_pages and max_pages.strip().isdigit() else 0
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
+        
+        # 💡 [속도 최적화] 불필요한 리소스 로드 차단
+        await page.route("**/*", lambda route: route.abort() 
+            if route.request.resource_type in ["image", "stylesheet", "media", "font"] 
+            else route.continue_()
+        )
+        
         try:
             # 1. 먼저 리스트를 모두 수집합니다.
             print(f"[*] [통합수집 1단계] 리스트 페이지 진입: {url}", flush=True)
-            await page.goto(url, wait_until="networkidle", timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await UniversalCrawler.apply_filter_and_search(page, rasmbly_numpr)
             
             total_pages = await UniversalCrawler.get_total_pages(page)
-            target_pages = total_pages if max_pages == 0 else min(max_pages, total_pages)
+            target_pages = total_pages if safe_max_pages == 0 else min(safe_max_pages, total_pages)
             
             for current_page in range(1, target_pages + 1):
+                # 🛑 [중단 로직 1] 리스트 수집 중 /stop 호출 시 탈출
+                if app.state.stop_scraping:
+                    print("[!] 중단 요청 감지: 리스트 수집을 즉시 멈춥니다.", flush=True)
+                    break
+
                 print(f"[*] 리스트 수집 중: {current_page}/{target_pages} 페이지", flush=True)
                 items = await UniversalCrawler.extract_list_page(page, listClass)
-                all_data.extend(items)
+                list_data.extend(items) # all_data가 아닌 list_data에 저장
                 
                 if current_page < target_pages:
                     moved = await UniversalCrawler.go_to_page(page, current_page + 1)
                     if not moved: break
 
             # 2. 추출된 ID를 기반으로 뷰 페이지를 순차 수집하여 병합합니다.
-            total_items = len(all_data)
+            total_items = len(list_data)
             print(f"[*] [통합수집 2단계] 총 {total_items}건의 상세 뷰 수집을 시작합니다.", flush=True)
 
-            for idx, item in enumerate(all_data):
+            for idx, item in enumerate(list_data):
+                # 🛑 [중단 로직 2] 상세 뷰 수집 중 /stop 호출 시 즉시 탈출!
+                if app.state.stop_scraping:
+                    print(f"[!] 중단 요청 감지: {idx}번째 상세 수집 중 즉시 멈춥니다.", flush=True)
+                    break
+
                 view_id = item.get("view_id")
                 if not view_id: continue
 
@@ -417,7 +441,7 @@ async def api_scrape_view(
                 print(f"[*] 상세 수집 중 ({idx+1}/{total_items}) ... ID: {view_id}", flush=True)
                 
                 try:
-                    await page.goto(target_url, wait_until="networkidle", timeout=15000)
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
                     parsed = urlparse(target_url)
                     base_url = f"{parsed.scheme}://{parsed.netloc}"
                     
@@ -426,32 +450,45 @@ async def api_scrape_view(
                     # Sections 데이터를 마지막으로 내리기 위한 분리
                     sections_data = view_detail.pop("sections", {})
                     
-                    # 리스트 원본 + 상세 정보 + Sections 병합
-                    all_data[idx] = {
+                    # 💡 [핵심 수정 2] 리스트 찌꺼기(**item) 제외하고 순수 뷰 데이터만 생성
+                    view_item = {
                         "view_id": view_id,
                         "view_url": target_url,
-                        **item,
                         **view_detail,
                         "sections": sections_data
                     }
+                    view_data_list.append(view_item)
+                    
                 except Exception as e:
                     print(f"[!] {view_id} 상세 수집 실패: {e}", flush=True)
-                    all_data[idx]["view_error"] = str(e) # 한 건이 실패해도 전체 로직은 멈추지 않습니다.
+                    view_data_list.append({
+                        "view_id": view_id,
+                        "view_url": target_url,
+                        "view_error": str(e)
+                    })
 
             # 최종 병합 파일 저장
-            filepath = save_to_json(all_data, domain, "view_all")
+            filepath = save_to_json(view_data_list, domain, "view_all")
             
             return {
                 "ok": True,
                 "domain": domain,
                 "saved_file": filepath,
-                "total_count": len(all_data),
-                "data": all_data
+                "total_count": len(view_data_list),
+                "is_stopped_early": app.state.stop_scraping, # 중단 여부 반환
+                "data": view_data_list
             }
 
         except Exception as e:
-            filepath = save_to_json(all_data, domain, "view_error_partial")
-            return {"ok": False, "error_msg": str(e), "saved_file": filepath, "data": all_data}
+            # 에러 발생 시 현재까지 수집된 순수 뷰 데이터만 반환
+            filepath = save_to_json(view_data_list, domain, "view_error_partial")
+            return {
+                "ok": False, 
+                "error_msg": str(e), 
+                "saved_file": filepath, 
+                "is_stopped_early": app.state.stop_scraping,
+                "data": view_data_list
+            }
         finally:
             await browser.close()
 
