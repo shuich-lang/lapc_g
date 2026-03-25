@@ -95,6 +95,34 @@ FIELD_MAP = {
     "관련자료": "BI_FILE_NM",
 
     "첨부파일링크": "BI_FILE_URL",
+
+    "접수일": "PLNMT_FRWRD_DE",
+    "접수일자": "PLNMT_FRWRD_DE",
+
+    "회부일": "PLNMT_FRWRD_DE",
+    "회부일자": "PLNMT_FRWRD_DE",
+
+    "보고일": "PLNMT_REPORT_DE",
+    "보고일자": "PLNMT_REPORT_DE",
+    "본회의 보고일": "PLNMT_REPORT_DE",
+    "심사보고일": "PLNMT_REPORT_DE",
+
+    "상정일": "PLNMT_SBMISN_DE",
+    "상정일자": "PLNMT_SBMISN_DE",
+    "본회의 상정일": "PLNMT_SBMISN_DE",
+
+    "의결일": "PLNMT_PROCESS_DE",
+    "의결일자": "PLNMT_PROCESS_DE",
+    "본회의 의결일": "PLNMT_PROCESS_DE",
+    "처리일": "PLNMT_PROCESS_DE",
+
+    "처리 결과": "PLNMT_RESULT",
+    "처리결과": "PLNMT_RESULT",
+    "심사 결과": "PLNMT_RESULT",
+    "심사결과": "PLNMT_RESULT",
+    "결과": "PLNMT_RESULT",
+
+    "위원회": "JRSD_CMIT_NM",
 }
 
 

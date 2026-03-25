@@ -81,42 +81,112 @@ class UniversalCrawler:
     @staticmethod
     async def apply_filter_and_search(page: Page, numpr: str):
         print(f"[*] 필터 적용 시도: 대수={numpr}", flush=True)
+
         try:
+            if len(page.listeners("dialog")) == 0:
+                page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
+        except: pass
+
+        try:
+            # 1. 대수 선택기
             selects = await page.query_selector_all("select")
+            changed_count = 0
+            
             for select in selects:
                 options = await select.query_selector_all("option")
+                target_value = None
+                target_text = None
+                is_assembly = False
+                
                 for opt in options:
                     val = (await opt.get_attribute("value") or "").strip()
                     text = clean_text(await opt.inner_text())
                     
-                    # [핵심 방어 로직] "9"가 "339"에 포함되는 오작동 방지
-                    is_exact_val = (val == numpr or val == f"0{numpr}")
-                    is_exact_text = (f"제{numpr}대" in text)
+                    if "대" in text and any(str(i) in text for i in range(1, 20)) and "회" not in text:
+                        is_assembly = True
+                    if val == numpr or val == f"0{numpr}" or f"제{numpr}대" in text or f"{numpr}대" == text:
+                        target_value = val
+                        target_text = text
+                        
+                if is_assembly and target_value is not None:
+                    current_val = await select.evaluate("node => node.value")
+                    if current_val != target_value:
+                        await select.select_option(value=target_value)
+                        await select.evaluate("node => { node.dispatchEvent(new Event('change', { bubbles: true })); if (typeof jQuery !== 'undefined') jQuery(node).trigger('change'); }")
+                        await page.wait_for_timeout(1000)
+                        print(f"[+] 대수 세팅 완료: {target_text} (value={target_value})", flush=True)
+                    else:
+                        # 💡 [버그 수정 1] 이미 9대로 세팅되어 있다면 에러로 치부하지 않고 정상 인지!
+                        print(f"[+] 대수가 이미 '{target_text}'(으)로 설정되어 있습니다. (유지)", flush=True)
                     
-                    if is_exact_val or is_exact_text:
-                        # "회" (예: 제339회) 라는 글자가 포함되어 있으면 회기(Session)이므로 건너뜀
-                        if "회" in text and "대" not in text:
-                            continue
-                            
-                        await select.select_option(value=val)
-                        print(f"[+] 대수 선택 완료: {text} (value={val})", flush=True)
-                        break # 현재 select 박스 처리가 끝났으므로 다음 select 박스로 넘어감
+                    changed_count += 1 # 무조건 카운트 증가
+
+            if changed_count == 0:
+                print(f"[-] 대수({numpr}) 옵션을 찾을 수 없습니다.", flush=True)
+
+            # 2. 💡 [핵심] 가짜 탭 버튼 배제 및 진짜 버튼 탐색
+            # 평범한 <a> 태그(상단 메뉴 등)는 제외하고, 진짜 '버튼' 역할을 하는 요소만 긁어모읍니다.
+            search_elements = await page.query_selector_all(
+                "button, input[type='submit'], input[type='button'], input[type='image'], a[class*='btn'], a[class*='search']"
+            )
+            clicked = False
             
-            # 검색 버튼 클릭 로직
-            search_btns = await page.query_selector_all("button, input[type='submit'], a.btn")
-            for btn in search_btns:
-                text = clean_text(await btn.inner_text()) or clean_text(await btn.get_attribute("value"))
-                if text and ("검색" in text or "조회" in text):
-                    await btn.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    print("[+] 검색 버튼 클릭 완료", flush=True)
+            for el in search_elements:
+                if not await el.is_visible(): continue
+                
+                tag_name = (await el.evaluate("node => node.tagName")).lower()
+                text = clean_text(await el.inner_text()) or clean_text(await el.get_attribute("value")) or clean_text(await el.get_attribute("title")) or clean_text(await el.get_attribute("alt"))
+                id_attr = (await el.get_attribute("id") or "").lower()
+                
+                # "검색/조회" 글자가 있거나, 태그 ID 자체가 'search'인 이미지/버튼
+                is_search_btn = text and ("검색" in text or "조회" in text)
+                if "search" in id_attr and tag_name in ["button", "input", "a"]: 
+                    is_search_btn = True
+                
+                if is_search_btn:
+                    # 💡 [함정 완벽 방어] 의안검색, 회기별검색 등 상단 메뉴 탭에 자주 쓰이는 단어 추가
+                    trap_words = ["엑셀", "초기화", "취소", "통합", "메뉴", "상세", "회기", "의안", "별검색", "다운", "연혁"]
+                    
+                    # 텍스트 안에 함정 단어가 포함되어 있다면 무조건 건너뜀 (단, 버튼 이름이 순수하게 "검색"인 경우는 제외)
+                    if any(trap in text for trap in trap_words) and text not in ["검색", "조회"]:
+                        continue
+                        
+                    print(f"[+] 진짜 폼(Form) 검색 버튼 발견! (태그:<{tag_name}>, 식별텍스트:'{text}') -> 클릭 시도", flush=True)
+                    
+                    try:
+                        async with page.expect_navigation(wait_until="domcontentloaded", timeout=5000):
+                            await el.evaluate("node => node.click()")
+                    except Exception:
+                        await page.wait_for_timeout(3000)
+                        
+                    clicked = True
+                    print("[+] 화면 갱신 및 렌더링 완료", flush=True)
                     break
+
+            # 3. 폼 전송
+            if not clicked:
+                forms = await page.query_selector_all("form")
+                for form in forms:
+                    action = await form.get_attribute("action") or ""
+                    if any(k in action.lower() for k in ["search", "list", "bill", "minutes"]):
+                        print("[+] 검색 버튼 탐색 실패. Form Submit 강제 전송 시도", flush=True)
+                        try:
+                            async with page.expect_navigation(wait_until="domcontentloaded", timeout=5000):
+                                await form.evaluate("node => { if(typeof node.onsubmit === 'function'){ node.onsubmit(); } else { node.dispatchEvent(new Event('submit', {cancelable: true, bubbles: true})); } }")
+                        except:
+                            await page.wait_for_timeout(3000)
+                        break
+
+            await page.wait_for_load_state("networkidle", timeout=3000)
+            
         except Exception as e:
-            print(f"[!] 필터 적용 중 예외 발생 (진행 유지): {e}", flush=True)
+            print(f"[!] 필터 적용 중 예외 발생: {e}", flush=True)
 
     @staticmethod
     async def scrape_list_page(page: Page, list_class: str, view_id_param: str = "code") -> List[Dict[str, Any]]:
-        selector = f"table.{list_class}"
+        class_parts = [c.strip() for c in list_class.split() if c.strip()]
+        safe_class = ".".join(class_parts)
+        selector = f"table.{safe_class}"
         await page.wait_for_selector(selector, timeout=10000)
         
         # 💡 [핵심 기술 1] 표의 헤더(thead)를 분석하여 2차원 매트릭스 그리드를 생성합니다.
@@ -189,25 +259,45 @@ class UniversalCrawler:
                 else:
                     item[key] = val
                     
-            # a 태그에서 링크, 아이디, 최종 제목(BI_SJ) 추출 (불변의 규칙)
+            # 💡 [초강력 3중망 ID 추출기] 어떤 악조건의 의회 사이트라도 반드시 ID를 찾아냅니다.
             a_tag = await row.query_selector("a")
             if a_tag:
                 a_text = clean_text(await a_tag.inner_text())
                 if a_text:
-                    item["BI_SJ"] = a_text # a 태그 안의 텍스트가 가장 정확한 안건 제목
+                    item["BI_SJ"] = a_text 
                     
-                onclick = await a_tag.get_attribute("onclick") or ""
-                href = await a_tag.get_attribute("href") or ""
+                a_href = await a_tag.get_attribute("href") or ""
+                a_onclick = await a_tag.get_attribute("onclick") or ""
+                tr_onclick = await row.get_attribute("onclick") or ""
                 
-                if href and not href.startswith("javascript") and href != "#":
-                    item["link_href"] = href
-                    match = re.search(rf"[?&]{view_id_param}=([^&]+)", href)
-                    if match: item["view_id"] = match.group(1)
+                view_id = None
+                
+                # 1망: 원본 href에 파라미터가 명시된 경우 (금천구 스타일)
+                if a_href and not a_href.startswith("javascript") and not a_href.startswith("#"):
+                    item["link_href"] = a_href
+                    match = re.search(rf"[?&]{view_id_param}=([^&]+)", a_href)
+                    if match: view_id = match.group(1)
                 else:
-                    item["link_href"] = href if href else onclick
-                    js_code = onclick if onclick else href
+                    item["link_href"] = a_href if a_href else a_onclick
+                    
+                # 2망: href에서 못 찾았다면, 행(Row) 전체 HTML에서 파라미터명으로 샅샅이 뒤지기
+                if not view_id:
+                    row_html = await row.inner_html()
+                    match = re.search(rf"[?&]?{view_id_param}=([^&\"'>\s]+)", row_html)
+                    if match: view_id = match.group(1)
+                    
+                # 3망: 파라미터명도 없다면? <a>나 <tr> 태그의 JS 함수 인자값 강제 추출 (구로구 스타일)
+                if not view_id:
+                    js_code = a_onclick if a_onclick else tr_onclick
+                    if not js_code and a_href.startswith("javascript"):
+                        js_code = a_href
+                        
                     match = re.search(r"\(['\"]?([^'\"),]+)['\"]?\)", js_code)
-                    if match: item["view_id"] = match.group(1)
+                    if match: view_id = match.group(1)
+
+                # 최종적으로 찾아낸 ID를 안전하게 저장
+                if view_id:
+                    item["view_id"] = view_id
             
             items.append(item)
             
@@ -215,8 +305,11 @@ class UniversalCrawler:
 
     @staticmethod
     async def extract_list_page(page: Page, list_class: str, view_id_param: str = "code") -> List[Dict[str, Any]]:
-        selector = f"table.{list_class}"
+        class_parts = [c.strip() for c in list_class.split() if c.strip()]
+        safe_class = ".".join(class_parts)
+        selector = f"table.{safe_class}"
         await page.wait_for_selector(selector, timeout=10000)
+        
         rows = await page.query_selector_all(f"{selector} tbody tr")
         items = []
         for row in rows:
@@ -227,39 +320,51 @@ class UniversalCrawler:
             # 💡 [방어 로직 1] 각 의회마다 컬럼 개수와 순서가 다르므로, 원본 텍스트 배열을 통째로 보존합니다.
             item["row_texts"] = [clean_text(await td.inner_text()) for td in tds]
             
-            # 💡 [핵심 최적화] tds[1] 같은 하드코딩 제거! 몇 번째 칸이든 상관없이 해당 줄(tr)에서 첫 번째 <a> 태그를 색출!
+           # a 태그에서 링크, 아이디, 최종 제목(BI_SJ) 추출
             a_tag = await row.query_selector("a")
             if a_tag:
-                # 링크가 걸린 텍스트가 곧 '안건 제목'이므로 정확하게 덮어쓰기
-                item["bill_name"] = clean_text(await a_tag.inner_text())
+                a_text = clean_text(await a_tag.inner_text())
+                if a_text:
+                    item["BI_SJ"] = a_text 
+                    
+                a_href = await a_tag.get_attribute("href") or ""
+                view_id = None
                 
-                onclick = await a_tag.get_attribute("onclick") or ""
-                href = await a_tag.get_attribute("href") or ""
-                
-                # GET 방식 (금천구 스타일)
-                if href and not href.startswith("javascript") and href != "#":
-                    item["link_href"] = href
-                    match = re.search(rf"[?&]{view_id_param}=([^&]+)", href)
-                    if match: item["view_id"] = match.group(1)
-                
-                # JS 함수 방식 (구로구 스타일)
+                # 1. 일반적인 파라미터 링크 방식 (금천구 등)
+                if a_href and not a_href.startswith("javascript") and not a_href.startswith("#"):
+                    item["link_href"] = a_href
+                    match = re.search(rf"[?&]{view_id_param}=([^&]+)", a_href)
+                    if match: view_id = match.group(1)
                 else:
-                    js_code = onclick if onclick else href
-                    match = re.search(r"\(['\"]?([^'\"),]+)['\"]?\)", js_code)
-                    if match: item["view_id"] = match.group(1)
+                    item["link_href"] = a_href
+                    
+                # Row 전체의 순수 HTML 문자열을 가져와서 JS 함수든 파라미터든 멱살 잡고 뜯어냅니다.
+                if not view_id:
+                    row_html = await row.inner_html()
+                    
+                    # 패턴 A: code=1234 형태 찾기
+                    match_param = re.search(rf"[?&]?{view_id_param}=([^&\"'>\s]+)", row_html)
+                    
+                    # 패턴 B: onclick="fn_view_page('0092812')" 형태 찾기 (구로구 완벽 저격)
+                    # 어떤 함수명(fn_view 등)이 오든 괄호 안의 첫 번째 따옴표 안의 값을 무조건 가져옵니다!
+                    match_js = re.search(r"onclick\s*=\s*[\"'][a-zA-Z0-9_]+\([\"']([^\"']+)[\"']\)", row_html)
+                    
+                    if match_param:
+                        view_id = match_param.group(1)
+                    elif match_js:
+                        view_id = match_js.group(1)
+
+                if view_id:
+                    item["view_id"] = view_id
                     
             items.append(item)
         return items
     
     @staticmethod
     async def extract_view_detail(page: Page, view_class: str, base_url: str) -> Dict[str, Any]:
-        """상태 기계(State Machine) 패턴을 적용한 만능 테이블 파서"""
         selector = f"table.{view_class}"
-        # 금천구처럼 board_view가 아닌 normal_list를 상세로 쓰는 경우 방어
-        if await page.locator("table.normal_list").count() > 0 and await page.locator(selector).count() == 0:
-            selector = "table.normal_list"
-            
         await page.wait_for_selector(selector, timeout=10000)
+        
         rows = await page.query_selector_all(f"{selector} tbody tr")
         
         result = {"sections": {}}
@@ -488,7 +593,7 @@ async def api_scrape_list(
             await browser.close()
 
 
-@app.get("/scrapeView")
+@app.get("/crawl/bill")
 async def api_scrape_view(
     list_url: str = Query(..., description="의회 리스트 URL"),
     view_url: str = Query(..., description="상세 진입 URL (예: .../billview.do)"),
@@ -577,20 +682,21 @@ async def api_scrape_view(
                 view_id = item.get("view_id")
                 link_href = item.get("link_href")
 
-                # 💡 [예외 처리] 아이디도 없고 링크도 없으면 패스
-                if not view_id and not link_href: continue
+                # 아이디가 없으면 무조건 패스
+                if not view_id: continue
 
-                # 💡 [만능 라우터] 링크 형태에 맞춰 GET / 동적 URL 조립을 알아서 분기합니다.
-                if link_href:
-                    # [Case A] 금천구처럼 원본 링크에 수많은 필수 파라미터가 섞여 있는 경우
+                # 💡 [만능 라우터] "#"이나 "javascript"로 시작하는지 철저히 검증
+                is_real_link = link_href and not link_href.startswith("#") and not link_href.startswith("javascript")
+                
+                if is_real_link:
+                    # [Case A: 금천구] 진짜 GET 링크가 있으면 원본 URL에 도메인을 붙여서 사용
                     target_url = urljoin(list_url, link_href)
                 else:
-                    # [Case B] 구로구처럼 JS 함수만 있어서 URL을 우리가 직접 창조해야 하는 경우
+                    # [Case B: 구로구] 파라미터 조립 (view_url + ? + code=2812)
                     separator = "&" if "?" in view_url else "?"
                     target_url = f"{view_url}{separator}{view_id_param}={view_id}"
                 
                 print(f"[*] 상세 수집 중 ({idx+1}/{total_items}) ... ID: {view_id}", flush=True)
-                
                 # (이하 try-except 상세 페이지 접속 코드는 기존과 동일)
                 
                 try:
