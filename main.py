@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin, urlparse
+import urllib.request
 
 from fastapi import FastAPI, Query, Request
 from playwright.async_api import async_playwright, Page
@@ -184,120 +185,130 @@ class UniversalCrawler:
 
     @staticmethod
     async def scrape_list_page(page: Page, list_class: str, view_id_param: str = "code") -> List[Dict[str, Any]]:
-        class_parts = [c.strip() for c in list_class.split() if c.strip()]
-        safe_class = ".".join(class_parts)
-        selector = f"table.{safe_class}"
+        # 💡 [범용 셀렉터 엔진] table, div, ul 완벽 지원
+        selector = list_class.strip()
+        if not selector.startswith(".") and not selector.startswith("table") and not selector.startswith("div") and not selector.startswith("ul"):
+            selector = f"table.{selector}"
+            
         await page.wait_for_selector(selector, timeout=10000)
         
         # 💡 [핵심 기술 1] 표의 헤더(thead)를 분석하여 2차원 매트릭스 그리드를 생성합니다.
-        # (금천구처럼 rowspan, colspan이 복잡하게 얽힌 다중 헤더를 완벽히 평탄화)
         thead_rows = await page.query_selector_all(f"{selector} thead tr")
-        header_grid = {}
-        max_cols = 0
-        
-        for r_idx, tr in enumerate(thead_rows):
-            ths = await tr.query_selector_all("th, td")
-            c_idx = 0
-            for th in ths:
-                # 이미 병합(span)으로 채워진 칸은 건너뜀
-                while header_grid.get((r_idx, c_idx)) is not None:
-                    c_idx += 1
-                
-                text = clean_text(await th.inner_text())
-                colspan = int(await th.get_attribute("colspan") or 1)
-                rowspan = int(await th.get_attribute("rowspan") or 1)
-                
-                for i in range(rowspan):
-                    for j in range(colspan):
-                        header_grid[(r_idx + i, c_idx + j)] = text
-                c_idx += colspan
-                max_cols = max(max_cols, c_idx)
-                
-        # 💡 [핵심 기술 2] 각 열(Column)별로 최종 필드명(BI_NO, PROPSR 등)을 동적 매핑합니다.
         col_keys = []
-        for c in range(max_cols):
-            col_texts = []
-            for r in range(len(thead_rows)):
-                val = header_grid.get((r, c))
-                if val and val not in col_texts:
-                    col_texts.append(val)
+        
+        if thead_rows:
+            header_grid = {}
+            max_cols = 0
+            for r_idx, tr in enumerate(thead_rows):
+                ths = await tr.query_selector_all("th, td")
+                c_idx = 0
+                for th in ths:
+                    while header_grid.get((r_idx, c_idx)) is not None:
+                        c_idx += 1
+                    text = clean_text(await th.inner_text())
+                    colspan = int(await th.get_attribute("colspan") or 1)
+                    rowspan = int(await th.get_attribute("rowspan") or 1)
+                    for i in range(rowspan):
+                        for j in range(colspan):
+                            header_grid[(r_idx + i, c_idx + j)] = text
+                    c_idx += colspan
+                    max_cols = max(max_cols, c_idx)
                     
-            if not col_texts:
-                col_keys.append(f"UNKNOWN_{c}")
-                continue
+            for c in range(max_cols):
+                col_texts = []
+                for r in range(len(thead_rows)):
+                    val = header_grid.get((r, c))
+                    if val and val not in col_texts:
+                        col_texts.append(val)
+                if not col_texts:
+                    col_keys.append(f"UNKNOWN_{c}")
+                    continue
                 
-            # 부모 카테고리(section)와 실제 라벨(label) 분리 (예: section="본회의", label="처리결과")
-            section = col_texts[0] if len(col_texts) > 1 else None
-            label = col_texts[-1]
-            
-            # 뷰 수집에서 쓰던 get_mapped_key를 리스트 수집에서도 동일하게 재활용!
-            mapped_key = get_mapped_key(label, section)
-            col_keys.append(mapped_key)
+                section = col_texts[0] if len(col_texts) > 1 else None
+                label = col_texts[-1]
+                # 범용 키 매핑 적용
+                col_keys.append(get_mapped_key(label, section))
 
-        # 💡 [핵심 기술 3] 파악된 헤더 구조(col_keys)를 바탕으로 본문(tbody) 데이터를 결합합니다.
-        rows = await page.query_selector_all(f"{selector} tbody tr")
+        # 💡 [핵심 기술 3] 파악된 헤더 구조를 바탕으로 본문(tbody 또는 li) 데이터를 결합
+        rows = await page.query_selector_all(f"{selector} tbody tr, {selector} ul > li, {selector} .list_row")
         items = []
+        
         for row in rows:
+            # table이면 td를 찾고, div/ul 리스트면 내부 div나 span을 셀(cell)로 간주
             tds = await row.query_selector_all("td")
+            if not tds:
+                tds = await row.query_selector_all("div, span")
+                
             if not tds: continue
             
             item = {}
-            for i, td in enumerate(tds):
-                if i >= len(col_keys): break
-                key = col_keys[i]
-                val = clean_text(await td.inner_text())
-                
-                if not val: continue
-                
-                # 콤마(,) 정규화: 스페이스바로 띄어진 이름들을 콤마로 예쁘게 연결
-                if key == "PROPSR":
-                    val = ", ".join(v for v in val.split() if v)
-                
-                # 중복 키 결합 (예: 금천구의 '대표발의자'와 '공동발의자'가 모두 PROPSR로 매핑되었을 때 병합)
-                if key in item and item[key]:
-                    item[key] = f"{item[key]}, {val}"
-                else:
-                    item[key] = val
+            if col_keys:
+                for i, td in enumerate(tds):
+                    if i >= len(col_keys): break
+                    key = col_keys[i]
+                    val = clean_text(await td.inner_text())
                     
-            # 💡 [초강력 3중망 ID 추출기] 어떤 악조건의 의회 사이트라도 반드시 ID를 찾아냅니다.
+                    if not val: continue
+                    if key == "PROPSR":
+                        val = ", ".join(v for v in val.split() if v)
+                        
+                    if key in item and item[key]:
+                        item[key] = f"{item[key]}, {val}"
+                    else:
+                        item[key] = val
+                    
+            # 💡 [초강력 3중망 ID 추출기]
             a_tag = await row.query_selector("a")
+            tr_onclick = await row.get_attribute("onclick") or ""
+            
+            a_href = ""
+            a_onclick = ""
+            
             if a_tag:
                 a_text = clean_text(await a_tag.inner_text())
                 if a_text:
                     item["BI_SJ"] = a_text 
-                    
                 a_href = await a_tag.get_attribute("href") or ""
                 a_onclick = await a_tag.get_attribute("onclick") or ""
-                tr_onclick = await row.get_attribute("onclick") or ""
-                
-                view_id = None
-                
-                # 1망: 원본 href에 파라미터가 명시된 경우 (금천구 스타일)
-                if a_href and not a_href.startswith("javascript") and not a_href.startswith("#"):
-                    item["link_href"] = a_href
-                    match = re.search(rf"[?&]{view_id_param}=([^&]+)", a_href)
-                    if match: view_id = match.group(1)
-                else:
-                    item["link_href"] = a_href if a_href else a_onclick
-                    
-                # 2망: href에서 못 찾았다면, 행(Row) 전체 HTML에서 파라미터명으로 샅샅이 뒤지기
-                if not view_id:
-                    row_html = await row.inner_html()
-                    match = re.search(rf"[?&]?{view_id_param}=([^&\"'>\s]+)", row_html)
-                    if match: view_id = match.group(1)
-                    
-                # 3망: 파라미터명도 없다면? <a>나 <tr> 태그의 JS 함수 인자값 강제 추출 (구로구 스타일)
-                if not view_id:
-                    js_code = a_onclick if a_onclick else tr_onclick
-                    if not js_code and a_href.startswith("javascript"):
-                        js_code = a_href
-                        
-                    match = re.search(r"\(['\"]?([^'\"),]+)['\"]?\)", js_code)
-                    if match: view_id = match.group(1)
+            else:
+                for td in tds:
+                    title_attr = await td.get_attribute("title")
+                    if title_attr:
+                        item["BI_SJ"] = clean_text(title_attr)
+                        break
 
-                # 최종적으로 찾아낸 ID를 안전하게 저장
-                if view_id:
-                    item["view_id"] = view_id
+            view_id = None
+            
+            # 1망: 원본 href 
+            if a_href and not a_href.startswith("javascript") and not a_href.startswith("#"):
+                clean_href = a_href.replace("&amp;", "&")
+                item["link_href"] = clean_href
+                match = re.search(rf"[?&]{view_id_param}=([^&]+)", clean_href)
+                if match: 
+                    view_id = match.group(1)
+                else:
+                    auto_match = re.search(r"[?&](uid|idx|code|no|seq|id|bill_no|billNo|idx_no|nttId|uuid)=([^&]+)", clean_href, re.IGNORECASE)
+                    if auto_match:
+                        view_id = auto_match.group(2)
+            else:
+                item["link_href"] = a_href if a_href else (a_onclick or tr_onclick)
+                
+            # 2망: Row 전체 HTML
+            if not view_id:
+                row_html = await row.inner_html()
+                match = re.search(rf"[?&]?{view_id_param}=([^&\"'>\s]+)", row_html)
+                if match: view_id = match.group(1)
+                
+            # 3망: JS 함수 인자값 강제 추출
+            if not view_id:
+                js_code = a_onclick if a_onclick else tr_onclick
+                if not js_code and a_href.startswith("javascript"):
+                    js_code = a_href
+                match = re.search(r"\(['\"]?([^'\"),]+)['\"]?\)", js_code)
+                if match: view_id = match.group(1)
+
+            if view_id:
+                item["view_id"] = view_id
             
             items.append(item)
             
@@ -305,22 +316,32 @@ class UniversalCrawler:
 
     @staticmethod
     async def extract_list_page(page: Page, list_class: str, view_id_param: str = "code") -> List[Dict[str, Any]]:
-        class_parts = [c.strip() for c in list_class.split() if c.strip()]
-        safe_class = ".".join(class_parts)
-        selector = f"table.{safe_class}"
+        # 💡 [범용 셀렉터 엔진]
+        selector = list_class.strip()
+        if not selector.startswith(".") and not selector.startswith("table") and not selector.startswith("div") and not selector.startswith("ul"):
+            selector = f"table.{selector}"
+            
         await page.wait_for_selector(selector, timeout=10000)
         
-        rows = await page.query_selector_all(f"{selector} tbody tr")
+        rows = await page.query_selector_all(f"{selector} tbody tr, {selector} ul > li, {selector} .list_row")
         items = []
         for row in rows:
             tds = await row.query_selector_all("td")
+            if not tds:
+                tds = await row.query_selector_all("div, span")
             if not tds: continue
             
             item = {}
-            # 💡 [방어 로직 1] 각 의회마다 컬럼 개수와 순서가 다르므로, 원본 텍스트 배열을 통째로 보존합니다.
             item["row_texts"] = [clean_text(await td.inner_text()) for td in tds]
             
-           # a 태그에서 링크, 아이디, 최종 제목(BI_SJ) 추출
+            view_id = None
+            link_href = ""
+            onclick_text = ""
+            
+            tr_onclick = await row.get_attribute("onclick") or ""
+            if tr_onclick:
+                onclick_text = tr_onclick
+
             a_tag = await row.query_selector("a")
             if a_tag:
                 a_text = clean_text(await a_tag.inner_text())
@@ -328,90 +349,179 @@ class UniversalCrawler:
                     item["BI_SJ"] = a_text 
                     
                 a_href = await a_tag.get_attribute("href") or ""
-                view_id = None
+                link_href = a_href
                 
-                # 1. 일반적인 파라미터 링크 방식 (금천구 등)
+                a_onclick = await a_tag.get_attribute("onclick") or ""
+                if a_onclick:
+                    onclick_text = a_onclick
+                
                 if a_href and not a_href.startswith("javascript") and not a_href.startswith("#"):
-                    item["link_href"] = a_href
-                    match = re.search(rf"[?&]{view_id_param}=([^&]+)", a_href)
-                    if match: view_id = match.group(1)
-                else:
-                    item["link_href"] = a_href
-                    
-                # Row 전체의 순수 HTML 문자열을 가져와서 JS 함수든 파라미터든 멱살 잡고 뜯어냅니다.
+                    clean_href = a_href.replace("&amp;", "&")
+                    match = re.search(rf"[?&]{view_id_param}=([^&]+)", clean_href)
+                    if match: 
+                        view_id = match.group(1)
+                    else:
+                        auto_match = re.search(r"[?&](uid|idx|code|no|seq|id|bill_no|billNo|idx_no|nttId)=([^&]+)", clean_href, re.IGNORECASE)
+                        if auto_match:
+                            view_id = auto_match.group(2)
+            else:
+                for td in tds:
+                    title_attr = await td.get_attribute("title")
+                    if title_attr:
+                        item["BI_SJ"] = clean_text(title_attr)
+                        break
+
+            item["link_href"] = link_href
+            
+            if not view_id:
+                if onclick_text:
+                    match_js = re.search(r"['\"]([^'\"]+)['\"]", onclick_text)
+                    if match_js:
+                        view_id = match_js.group(1)
+                
                 if not view_id:
                     row_html = await row.inner_html()
-                    
-                    # 패턴 A: code=1234 형태 찾기
                     match_param = re.search(rf"[?&]?{view_id_param}=([^&\"'>\s]+)", row_html)
-                    
-                    # 패턴 B: onclick="fn_view_page('0092812')" 형태 찾기 (구로구 완벽 저격)
-                    # 어떤 함수명(fn_view 등)이 오든 괄호 안의 첫 번째 따옴표 안의 값을 무조건 가져옵니다!
-                    match_js = re.search(r"onclick\s*=\s*[\"'][a-zA-Z0-9_]+\([\"']([^\"']+)[\"']\)", row_html)
+                    match_js_html = re.search(r"onclick\s*=\s*[\"'][a-zA-Z0-9_]+\([\"']([^\"']+)[\"']\)", row_html)
                     
                     if match_param:
                         view_id = match_param.group(1)
-                    elif match_js:
-                        view_id = match_js.group(1)
+                    elif match_js_html:
+                        view_id = match_js_html.group(1)
 
-                if view_id:
-                    item["view_id"] = view_id
-                    
+            if view_id:
+                item["view_id"] = view_id
+                
             items.append(item)
         return items
     
     @staticmethod
     async def extract_view_detail(page: Page, view_class: str, base_url: str) -> Dict[str, Any]:
-        selector = f"table.{view_class}"
+        # 💡 [범용 셀렉터 엔진]
+        selector = view_class.strip()
+        if not selector.startswith(".") and not selector.startswith("table") and not selector.startswith("div") and not selector.startswith("ul"):
+            selector = f"table.{selector}"
+            
         await page.wait_for_selector(selector, timeout=10000)
         
-        rows = await page.query_selector_all(f"{selector} tbody tr")
+        rows = await page.query_selector_all(f"{selector} tbody tr, {selector} ul > li, {selector} .view_row")
         
         result = {"sections": {}}
         current_section = None
-        rowspan_counter = 0  # 💡 [핵심] 현재 구역이 몇 줄짜리인지 기억하는 카운터
+        rowspan_counter = 0
 
         for row in rows:
-            # 💡 [상태 기계] 줄이 바뀔 때마다 카운터를 깎고, 0이 되면 구역(섹션)을 초기화
             if rowspan_counter > 0:
                 rowspan_counter -= 1
             if rowspan_counter == 0:
                 current_section = None
 
-            ths = await row.query_selector_all("th")
-            tds = await row.query_selector_all("td")
+            ths = await row.query_selector_all("th, dt, .label, .title")
+            tds = await row.query_selector_all("td, dd, .value, .cont")
             
-            th_idx = 0
-            td_idx = 0
+            pairs = []
             
-            # 한 줄(tr) 안에 여러 쌍의 th-td 가 있을 수 있으므로 while 루프로 쌍을 맞춤
-            while th_idx < len(ths) and td_idx < len(tds):
-                th_el = ths[th_idx]
-                rowspan = await th_el.get_attribute("rowspan")
-                th_text = clean_text(await th_el.inner_text())
+            if len(ths) == 0 and len(tds) > 0:
+                td_el = tds[0]
+                inner_html = await td_el.inner_html()
                 
-                # [Case A] rowspan이 걸린 th를 만나면 새로운 구역(섹션) 진입
-                if rowspan and int(rowspan) > 1 and th_idx == 0:
-                    current_section = th_text
-                    rowspan_counter = int(rowspan)
-                    th_idx += 1  # 섹션 제목 th는 건너뛰고 다음 th(진짜 라벨)로 이동
-                    if th_idx >= len(ths): break
+                if "down" in inner_html.lower() or "첨부" in inner_html or "file" in inner_html.lower():
+                    fake_label = "본문내용_첨부파일"
+                else:
+                    fake_label = "본문내용"
+                pairs.append((fake_label, td_el))
+            else:
+                th_idx = 0
+                td_idx = 0
+                while th_idx < len(ths) and td_idx < len(tds):
                     th_el = ths[th_idx]
+                    rowspan = await th_el.get_attribute("rowspan")
                     th_text = clean_text(await th_el.inner_text())
+                    
+                    if rowspan and int(rowspan) > 1 and th_idx == 0:
+                        current_section = th_text
+                        rowspan_counter = int(rowspan)
+                        th_idx += 1 
+                        if th_idx >= len(ths): break
+                        th_el = ths[th_idx]
+                        th_text = clean_text(await th_el.inner_text())
 
-                label = th_text
-                td_el = tds[td_idx]
+                    pairs.append((th_text, tds[td_idx]))
+                    th_idx += 1
+                    td_idx += 1
+
+            for label, td_el in pairs:
                 val = clean_text(await td_el.inner_text())
                 
-                # --- 파일/회의록 특수 처리 ---
                 is_file = any(x in label for x in ["첨부", "파일", "원문"])
                 is_meeting = "회의록" in label
                 
                 if is_file or is_meeting:
-                    links = await td_el.query_selector_all("a")
-                    names = [clean_text(await l.inner_text()) for l in links]
-                    urls = [urljoin(base_url, await l.get_attribute("href") or "") for l in links]
+                    clickables = await td_el.query_selector_all("a, [onclick]")
+                    names = []
+                    urls = []
                     
+                    download_dir = r"C:\lapc_download"
+                    os.makedirs(download_dir, exist_ok=True)
+                    
+                    for el in clickables:
+                        raw_name = clean_text(await el.inner_text())
+                        title_attr = clean_text(await el.get_attribute("title")) or ""
+                        
+                        if is_file and (raw_name in ["바로보기", "바로듣기", "미리보기", "뷰어"] or title_attr in ["바로보기", "바로듣기"]):
+                            continue
+                                
+                        if not raw_name: continue
+                            
+                        href = await el.get_attribute("href") or ""
+                        onclick = await el.get_attribute("onclick") or ""
+                        
+                        is_js_link = href.startswith("javascript") or href.startswith("#")
+                        url_val = onclick if (is_js_link and onclick) else (href if href else onclick)
+                        if not is_js_link and url_val and not url_val.startswith("http"):
+                            url_val = urljoin(base_url, url_val)
+                            
+                        if is_file:
+                            print(f"[*] 동적 파일 다운로드 시도: {raw_name}", flush=True)
+                            try:
+                                await el.evaluate("node => node.removeAttribute('target')")
+                                async with page.expect_download(timeout=10000) as download_info:
+                                    await el.click()
+                                
+                                download = await download_info.value
+                                
+                                # 💡 [하이브리드 네이밍 시스템]
+                                # 1. 서버가 보내준 진짜 파일명 (예: 09GC0F01.HWP)
+                                real_server_name = download.suggested_filename
+                                
+                                # 2. 확장자 추출 (예: .HWP)
+                                _, ext = os.path.splitext(real_server_name)
+                                
+                                # 3. 게시판에 적힌 예쁜 이름(raw_name)에 확장자가 없다면 붙여줍니다.
+                                # (구로구처럼 이름은 "조례안"인데 파일이 "09GC.HWP"인 경우 완벽 대응)
+                                if not re.search(r'\.[a-zA-Z0-9]{2,4}$', raw_name):
+                                    final_file_name = f"{raw_name}{ext}"
+                                else:
+                                    final_file_name = raw_name
+                                    
+                                # 파일명에 쓸 수 없는 특수문자 제거
+                                final_file_name = re.sub(r'[\\/*?:"<>|]', "", final_file_name)
+                                    
+                                save_path = os.path.join(download_dir, final_file_name)
+                                
+                                await download.save_as(save_path)
+                                print(f"[+] 다운로드 성공: {save_path} (서버 원본명: {real_server_name})", flush=True)
+                                
+                                raw_name = final_file_name
+                                url_val = f"Downloaded (Trigger: {url_val})"
+                            except Exception as e:
+                                print(f"[-] 동적 다운로드 실패 ({raw_name}): {e}", flush=True)
+                                if page.url != base_url and not is_js_link:
+                                    await page.go_back(wait_until="domcontentloaded")
+                                
+                        names.append(raw_name)
+                        urls.append(url_val)
+
                     if is_file and names:
                         result["BI_FILE_NM"] = names[0] if len(names) == 1 else names
                         result["BI_FILE_URL"] = urls[0] if len(urls) == 1 else urls
@@ -419,26 +529,19 @@ class UniversalCrawler:
                         target = result["sections"].setdefault(current_section, {}) if current_section else result
                         target["RELATED_MEETING_NM"] = names[0] if len(names) == 1 else names
                         target["RELATED_MEETING_URL"] = urls[0] if len(urls) == 1 else urls
-                # --- 일반 텍스트 처리 ---
                 else:
                     mapped_key = get_mapped_key(label, current_section)
-                    
                     if mapped_key == "PROPSR" and val:
                         val = ", ".join(v for v in val.split() if v)
 
                     if current_section:
-                        # "본회의 처리사항" 등을 "본회의"로 정규화
                         sec_name = "위원회" if "위원회" in current_section else ("본회의" if "본회의" in current_section else current_section)
                         if sec_name not in result["sections"]:
                             result["sections"][sec_name] = {}
                         result["sections"][sec_name][mapped_key] = val
                     else:
                         result[mapped_key] = val
-                
-                th_idx += 1
-                td_idx += 1
 
-        # 빈 섹션 껍데기 제거
         if not result.get("sections"):
             result.pop("sections", None)
 
@@ -446,29 +549,34 @@ class UniversalCrawler:
 
     @staticmethod
     async def get_total_pages(page: Page) -> int:
-        """스마트 전체 페이지 수 추출기"""
         try:
-            # 1. '마지막' 버튼에서 추출 시도 (가장 정확함)
-            last_btn = page.locator(".num_last, .last, [title='마지막']").first
-            if await last_btn.count() > 0:
-                html = await last_btn.evaluate("el => el.outerHTML")
-                # fn_egov_link_page(64) 형태 파싱
-                nums = re.findall(r'\((\d+)\)', html)
-                if nums: return int(nums[0])
-                # page=64 형태 파싱
-                nums = re.findall(r'page=(\d+)', html)
-                if nums: return int(nums[0])
+            # 💡 [방어막 1] 대한민국 모든 관공서의 '마지막 페이지' 버튼 클래스 총망라
+            last_btn = await page.query_selector("a.last, a.num_last, a[title*='마지막'], a.btn-last, a.direction.last")
+            if last_btn:
+                href = await last_btn.get_attribute("href")
+                if href:
+                    # 💡 [핵심] pageNum, page_id 등 변칙 파라미터 완벽 대응
+                    match = re.search(r'[?&](?:page|pageIndex|p|page_no|pageno|cPage|pageNum|page_id)=(\d+)', href, re.IGNORECASE)
+                    if match:
+                        return int(match.group(1))
+                    
+                    # 만약 파라미터 이름조차 이상하다면? 제일 끝에 있는 숫자를 강제로 뜯어옴
+                    match_end = re.search(r'=(\d+)$', href)
+                    if match_end:
+                        return int(match_end.group(1))
+
+            # 💡 [방어막 2] '마지막' 버튼이 아예 없는 사이트라면? 눈에 보이는 숫자 버튼 중 가장 큰 값을 찾음
+            num_btns = await page.query_selector_all(".paging a, .pagination a, #pagingNav a")
+            max_num = 1
+            for btn in num_btns:
+                text = await btn.inner_text()
+                if text.strip().isdigit():
+                    max_num = max(max_num, int(text.strip()))
+            return max_num
             
-            # 2. 텍스트 정보에서 추출 (예: 1 / 64 page)
-            board_total = page.locator(".board_total, .total").first
-            if await board_total.count() > 0:
-                text_info = await board_total.inner_text()
-                nums = re.findall(r'/(\d+)', text_info.replace(' ', ''))
-                if nums: return int(nums[0])
         except Exception as e:
-            print(f"[!] 전체 페이지 수 추출 실패 (기본값 1 사용): {e}")
-            
-        return 1
+            print(f"[-] 총 페이지 수 계산 실패, 기본값(1) 적용: {e}", flush=True)
+            return 1
 
     @staticmethod
     async def go_to_page(page: Page, next_page: int, paging_sel: str, next_btn_sel: str) -> bool:
@@ -507,14 +615,14 @@ class UniversalCrawler:
 
 # --- REST API Endpoints ---
 
-@app.get("/scrapeList")
+@app.get("/crawl/billList")
 async def api_scrape_list(
     request: Request,
     list_url: str = Query(..., description="의회 리스트 URL"),
     view_url: Optional[str] = Query(None, description="상세 진입 URL (예: .../billview.do)"),
     view_id_param: str = Query("uuid", description="상세 페이지 식별 파라미터명 (예: code, idx, no, uuid 등)"),
-    rasmbly_numpr: str = Query("9", description="대수 (예: 9)"),
-    list_class: str = Query("stable", description="리스트 테이블 클래스"),
+    rasmbly_numpr: str = Query("", description="대수 (예: 9, 공백 시 필터 없이 전체/기본 검색)"),
+    list_class: str = Query("table.board_list", description="리스트 테이블 클래스"),
     view_class: Optional[str] = Query(None,  description="상세 테이블 클래스"),
     max_pages: str = Query("", description="공백 또는 0이면 전체 페이지 자동 수집, 숫자면 해당 페이지까지만"),
     paging_selector: str = Query(".pagination, .paging, #pagingNav", description="페이징 영역 클래스"),
@@ -538,7 +646,12 @@ async def api_scrape_list(
         try:
             print(f"[*] 리스트 페이지 진입: {list_url}", flush=True)
             await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
-            await UniversalCrawler.apply_filter_and_search(page, rasmbly_numpr)
+            
+            # 💡 [핵심 2] 파라미터가 비어있지 않을 때만 필터 조작, 비어있으면 기본 목록 쿨하게 수집
+            if rasmbly_numpr and rasmbly_numpr.strip():
+                await UniversalCrawler.apply_filter_and_search(page, rasmbly_numpr.strip())
+            else:
+                print("[*] 대수(rasmbly_numpr) 파라미터가 비어있습니다. 필터 조작 없이 사이트 기본 목록을 수집합니다.", flush=True)
             
             total_pages = await UniversalCrawler.get_total_pages(page)
             target_pages = total_pages if safe_max_pages == 0 else min(safe_max_pages, total_pages)
@@ -598,9 +711,9 @@ async def api_scrape_view(
     list_url: str = Query(..., description="의회 리스트 URL"),
     view_url: str = Query(..., description="상세 진입 URL (예: .../billview.do)"),
     view_id_param: str = Query("uuid", description="상세 페이지 식별 파라미터명 (예: code, idx, no, uuid 등)"),
-    rasmbly_numpr: str = Query("9", description="대수 (예: 9)"),
-    list_class: str = Query("stable", description="리스트 테이블 클래스"),
-    view_class: str = Query("board_view", description="상세 테이블 클래스"),
+    rasmbly_numpr: str = Query("", description="대수 (예: 9, 공백 시 필터 없이 전체/기본 검색)"),
+    list_class: str = Query("table.board_list", description="리스트 테이블 클래스"),
+    view_class: str = Query("table.board_view", description="상세 테이블 클래스"),
     max_pages: str = Query("", description="공백 또는 0이면 전체 페이지 자동 수집, 숫자면 해당 페이지까지만"),
     paging_selector: str = Query(".pagination, .paging, #pagingNav", description="페이징 영역 클래스"),
     next_btn_selector: str = Query(".num_right, .next, [title='다음'], .btn-next", description="다음 페이지 블록 버튼 클래스")
@@ -626,7 +739,12 @@ async def api_scrape_view(
             # 1. 리스트 수집
             print(f"[*] [통합수집 1단계] 리스트 페이지 진입: {list_url}", flush=True)
             await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
-            await UniversalCrawler.apply_filter_and_search(page, rasmbly_numpr)
+            
+            # 💡 [핵심 2] 파라미터가 정상적으로 들어왔을 때만 필터를 세팅하고, 공백이면 쿨하게 패스!
+            if rasmbly_numpr and rasmbly_numpr.strip():
+                await UniversalCrawler.apply_filter_and_search(page, rasmbly_numpr.strip())
+            else:
+                print("[*] 대수(rasmbly_numpr) 파라미터가 비어있습니다. 필터 조작 없이 사이트 기본 목록을 수집합니다.", flush=True)
             
             total_pages = await UniversalCrawler.get_total_pages(page)
             target_pages = total_pages if safe_max_pages == 0 else min(safe_max_pages, total_pages)
