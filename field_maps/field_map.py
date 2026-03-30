@@ -6,7 +6,7 @@ FIELD_MAP = {
     "회기": "RASMBLY_SESN", "처리 회기": "RASMBLY_SESN", "처리회기": "RASMBLY_SESN",
     "제안 회기": "RASMBLY_SESN", "제안회기": "RASMBLY_SESN",
     "소관위": "JRSD_CMIT_NM", "소관 위원회": "JRSD_CMIT_NM", "소관위원회": "JRSD_CMIT_NM",
-    "소관특별위원회": "JRSD_CMIT_NM", "관련위원회": "JRSD_CMIT_NM",
+    "소관특별위원회": "JRSD_CMIT_NM", "관련위원회": "JRSD_CMIT_NM", "소관부서": "JRSD_CMIT_NM",
     "대표 발의자": "PROPSR", "대표발의": "PROPSR", "대표 발의 의원": "PROPSR",
     "발의자": "PROPSR", "발의 의원": "PROPSR", "발의의원": "PROPSR",
     "제안(발의)자": "PROPSR", "공동발의자": "PROPSR", "제안자": "PROPSR",
@@ -55,6 +55,7 @@ _CMIT_FIELDS = {
     "심사 결과": "CMIT_RESULT", "심사결과": "CMIT_RESULT", "결과": "CMIT_RESULT",
     "비고": "CMIT_UPDT_OUTLINE",
     "관련 회의록": "CMIT_RELATED_MEETING",
+    "소관위원회 관련 회의록": "CMIT_RELATED_MEETING",
 }
 
 # 본회의 섹션 공통 필드
@@ -70,6 +71,7 @@ _PLNMT_FIELDS = {
     "심사 결과": "PLNMT_RESULT", "심사결과": "PLNMT_RESULT", "결과": "PLNMT_RESULT",
     "비고": "PLNMT_REMARK",
     "관련 회의록": "PLNMT_RELATED_MEETING",
+    "본회의 관련 회의록": "PLNMT_RELATED_MEETING",
 }
 
 # 섹션 이름 변형 -> 공통 템플릿 매핑 (사이트별 섹션명 차이 흡수)
