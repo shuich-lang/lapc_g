@@ -63,11 +63,19 @@ def save_to_json(data: Any, domain: str, prefix: str) -> str:
         json.dump(data, f, ensure_ascii=False, indent=4)
     print(f"[+] 저장: {filepath}", flush=True)
     return filepath
-
 def normalize_selector(selector: str) -> str:
-    """CSS 셀렉터가 클래스명만 들어온 경우 'table.' 접두사 보정"""
+    """
+    클래스명(.name)이나 ID(#name)만 들어와도 Playwright가 인식할 수 있는 표준 셀렉터로 반환합니다.
+    """
+    if not selector: return ""
     s = selector.strip()
-    return s if s.startswith((".", "table", "div", "ul", "#")) else f"table.{s}"
+    
+    # 이미 표준 셀렉터 형식이면 그대로 반환
+    if any(s.startswith(p) for p in (".", "#", "[", "table", "div", "ul", "nav", "span", "a", "button")):
+        return s
+    
+    # 태그 없이 이름만 들어온 경우 클래스로 간주 (유연성 확보)
+    return f".{s}"
 
 def get_mapped_key(label: str, section: Optional[str] = None) -> str:
     """라벨 텍스트를 FIELD_MAP 표준 키로 변환"""
@@ -94,13 +102,16 @@ async def _setup_browser(pw):
     return browser, page
 
 async def _collect_pages(page, list_url, numpr, list_class, vid_param,
-                         max_pages, paging_sel, next_btn_sel, extractor, stop_check):
+                         max_pages, paging_sel, next_btn_sel, extractor, stop_check, search_form_selector, numpr_select_selector, search_btn_selector):
     """공통 리스트 수집 루프 (필터 + 페이지네이션)"""
     await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
+    
     if numpr and numpr.strip():
-        await UniversalCrawler.apply_filter_and_search(page, numpr.strip())
+        # 검색 후 list_class가 나타날 때까지 기다리도록 인자 추가
+        await UniversalCrawler.apply_filter_and_search(page, numpr.strip(), list_class, search_form_selector, numpr_select_selector, search_btn_selector)
     else:
-        print("[*] 대수 파라미터 없음 -> 기본 목록 수집", flush=True)
+        # 검색 안 할 때도 리스트는 기다려야 함
+        await page.wait_for_selector(normalize_selector(list_class), timeout=10000)
 
     total = await UniversalCrawler.get_total_pages(page)
     safe_max = int(max_pages.strip()) if max_pages and max_pages.strip().isdigit() else 0
@@ -137,77 +148,53 @@ async def _try_url_fallback(page, next_page):
 class UniversalCrawler:
 
     @staticmethod
-    async def apply_filter_and_search(page: Page, numpr: str):
-        """대수(select) 세팅 후 검색 버튼 클릭"""
-        print(f"[*] 필터: 대수={numpr}", flush=True)
+    async def apply_filter_and_search(
+        page: Page, 
+        numpr: str, 
+        list_class: str,
+        form_sel: str,
+        select_sel: str,
+        btn_sel: str
+    ):
+        print(f"[*] 필터 적용 시작 (대수:{numpr})", flush=True)
         try:
-            if not page.listeners("dialog"):
-                page.on("dialog", lambda d: asyncio.create_task(d.accept()))
-        except: pass
-
-        try:
-            # 대수 선택
-            changed = False
-            for select in await page.query_selector_all("select"):
-                options = await select.query_selector_all("option")
-                is_asm, t_val, t_txt = False, None, None
+            # 1. 특정된 대수 셀렉터로 선택
+            # 사용자가 준 select_sel (예: select#th_sch) 내에서 옵션 탐색
+            target_select = await page.query_selector(select_sel)
+            if target_select and numpr:
+                options = await target_select.query_selector_all("option")
                 for opt in options:
                     val = (await opt.get_attribute("value") or "").strip()
-                    txt = clean_text(await opt.inner_text())
-                    if "대" in txt and any(str(i) in txt for i in range(1, 20)) and "회" not in txt:
-                        is_asm = True
-                    if val == numpr or val == f"0{numpr}" or f"제{numpr}대" in txt or f"{numpr}대" == txt:
-                        t_val, t_txt = val, txt
-                if is_asm and t_val:
-                    cur = await select.evaluate("node => node.value")
-                    if cur != t_val:
-                        await select.select_option(value=t_val)
-                        await select.evaluate("node => { node.dispatchEvent(new Event('change',{bubbles:true})); if(typeof jQuery!=='undefined') jQuery(node).trigger('change'); }")
-                        await page.wait_for_timeout(1000)
-                    print(f"[+] 대수: {t_txt} (value={t_val})", flush=True)
-                    changed = True
-            if not changed:
-                print(f"[-] 대수({numpr}) 옵션 없음", flush=True)
-
-            # 검색 버튼 탐색 및 클릭
-            clicked = False
-            for el in await page.query_selector_all(
-                "button, input[type='submit'], input[type='button'], input[type='image'], a[class*='btn'], a[class*='search']"
-            ):
-                if not await el.is_visible(): continue
-                tag = (await el.evaluate("node => node.tagName")).lower()
-                text = (clean_text(await el.inner_text()) or clean_text(await el.get_attribute("value"))
-                        or clean_text(await el.get_attribute("title")) or clean_text(await el.get_attribute("alt")))
-                id_attr = (await el.get_attribute("id") or "").lower()
-                is_search = (text and ("검색" in text or "조회" in text)) or ("search" in id_attr and tag in ["button", "input", "a"])
-                if not is_search: continue
-                if any(t in text for t in TRAP_WORDS) and text not in ["검색", "조회"]: continue
-
-                print(f"[+] 검색 클릭: <{tag}> '{text}'", flush=True)
-                try:
-                    async with page.expect_navigation(wait_until="domcontentloaded", timeout=5000):
-                        await el.evaluate("node => node.click()")
-                except:
-                    await page.wait_for_timeout(3000)
-                clicked = True
-                break
-
-            # 폼 submit 폴백
-            if not clicked:
-                for form in await page.query_selector_all("form"):
-                    action = (await form.get_attribute("action") or "").lower()
-                    if any(k in action for k in ["search", "list", "bill", "minutes"]):
-                        print("[+] Form submit 전송", flush=True)
-                        try:
-                            async with page.expect_navigation(wait_until="domcontentloaded", timeout=5000):
-                                await form.evaluate("node => { node.onsubmit ? node.onsubmit() : node.dispatchEvent(new Event('submit',{cancelable:true,bubbles:true})); }")
-                        except:
-                            await page.wait_for_timeout(3000)
+                    txt = (await opt.inner_text() or "").strip()
+                    if val == numpr or val == f"0{numpr}" or f"{numpr}대" in txt:
+                        await target_select.select_option(value=val)
+                        await target_select.evaluate("node => node.dispatchEvent(new Event('change', {bubbles:true}))")
+                        print(f"[+] 대수 선택 완료: {txt}", flush=True)
                         break
 
-            await page.wait_for_load_state("networkidle", timeout=3000)
+            # 2. 특정된 검색 버튼 클릭
+            # btn_sel은 "button.btn.blue, #btnSearch" 처럼 쉼표로 여러 개를 받을 수 있음
+            try:
+                print(f"[*] 검색 버튼 대기 및 클릭: {btn_sel}", flush=True)
+                # 버튼이 나타날 때까지 짧게 대기 후 클릭
+                btn = await page.wait_for_selector(btn_sel, timeout=5000, state="visible")
+                if btn:
+                    async with page.expect_navigation(timeout=10000):
+                        await btn.click()
+                    print("[+] 검색 버튼 클릭 성공", flush=True)
+            except:
+                # 버튼 클릭 실패 시 폼 직접 제출 (form_sel 활용)
+                print(f"[!] 버튼 클릭 실패, 폼({form_sel}) 직접 제출 시도...", flush=True)
+                await page.evaluate(f"document.querySelector('{form_sel}')?.submit()")
+                await page.wait_for_load_state("networkidle")
+
+            # 3. 결과 로딩 확인
+            if list_class:
+                await page.wait_for_selector(normalize_selector(list_class), timeout=10000)
+                print("[+] 리스트 로드 완료", flush=True)
+
         except Exception as e:
-            print(f"[!] 필터 예외: {e}", flush=True)
+            print(f"[!] 필터 적용 중 오류: {e}", flush=True)
 
     @staticmethod
     def _extract_view_id(href: str, onclick: str, row_html: str, view_id_param: str) -> Optional[str]:
@@ -504,7 +491,14 @@ class UniversalCrawler:
 
     @staticmethod
     async def go_to_page(page: Page, next_page: int, paging_sel: str, next_btn_sel: str) -> bool:
-        """다음 페이지 이동: 전자정부 JS -> 번호 클릭 -> 다음 블록 버튼"""
+        """
+        다음 페이지 이동 로직 (태그 제약 제거 버전)
+        """
+        # 1. 셀렉터 정규화 (.num_right -> .num_right 그대로 유지)
+        p_sel = normalize_selector(paging_sel)
+        n_sel = normalize_selector(next_btn_sel)
+
+        # 전자정부 JS 우선 처리
         try:
             if await page.evaluate("typeof fn_egov_link_page === 'function'"):
                 await page.evaluate(f"fn_egov_link_page({next_page});")
@@ -513,20 +507,27 @@ class UniversalCrawler:
         except: pass
 
         try:
-            link = page.locator(f"{paging_sel} a").filter(has_text=re.compile(f"^{next_page}$")).first
+            # [수정] p_sel 영역 내부의 '텍스트가 해당 숫자인' 요소를 찾음 (a 태그 제약 제거)
+            # 이렇게 하면 <a>2</a> 뿐만 아니라 <button>2</button> 도 클릭 가능합니다.
+            link = page.locator(p_sel).get_by_text(re.compile(f"^{next_page}$"), exact=True).first
+            
             if await link.count() > 0:
+                print(f"[*] 페이지 번호 클릭: {next_page}p (Selector: {p_sel})", flush=True)
                 await link.click()
                 await page.wait_for_load_state("domcontentloaded")
                 return True
-            nxt = page.locator(next_btn_sel).first
+
+            # [수정] 다음 버튼 역시 a 태그 제약 없이 n_sel 그 자체를 클릭
+            nxt = page.locator(n_sel).first
             if await nxt.count() > 0:
-                print("[*] 다음 블록(>) 클릭", flush=True)
+                print(f"[*] 다음 블록 클릭 (Selector: {n_sel})", flush=True)
                 await nxt.click()
                 await page.wait_for_load_state("domcontentloaded")
-                await page.wait_for_timeout(100)
+                await page.wait_for_timeout(500) 
                 return True
         except Exception as e:
-            print(f"[!] 페이지 이동 에러: {e}", flush=True)
+            print(f"[!] 페이지 이동 실패: {e}", flush=True)
+        
         return False
 
 
@@ -542,8 +543,14 @@ async def api_scrape_list(
     list_class: str = Query("table.board_list", description="리스트 테이블 셀렉터"),
     view_class: Optional[str] = Query(None, description="상세 테이블 셀렉터"),
     max_pages: str = Query("", description="수집 페이지 수 (공백/0=전체)"),
-    paging_selector: str = Query(".pagination, .paging, #pagingNav", description="페이징 영역 셀렉터"),
-    next_btn_selector: str = Query(".num_right, .next, [title='다음'], .btn-next", description="다음 블록 버튼 셀렉터")
+    paging_selector: str = Query("div%23pagingNav, div%23pagingNew", description="페이징 영역 셀렉터 (ex: div.paging)"),
+    next_btn_selector: str = Query("a.num_right, a.next, a[title='다음'], .btn-next", description="다음 버튼 셀렉터 (ex: a.next)"),
+    search_form_selector: str = Query("form%23search_form", description="검색 폼 셀렉터"),
+    numpr_select_selector: str = Query("select%23th_sch", description="대수 선택 셀렉터"),
+    search_btn_selector: str = Query("button.btn.blue, button[type='submit'], #btnSearch, .btn_search", description="검색 버튼 셀렉터"),
+    req_id: str = Query("", description="요청 ID (yyyyMMddHHmmssSSS)"),
+    type: str = Query("", description="구분 (의안, 회의록 등)"),
+    crw_id: str = Query("", description="수집 설정 ID")
 ):
     app.state.stop_scraping = False
     domain = extract_domain(list_url)
@@ -556,14 +563,15 @@ async def api_scrape_list(
             list_data = await _collect_pages(
                 page, list_url, rasmbly_numpr, list_class, view_id_param,
                 max_pages, paging_selector, next_btn_selector,
-                UniversalCrawler.scrape_list_page, lambda: app.state.stop_scraping
+                UniversalCrawler.scrape_list_page, lambda: app.state.stop_scraping,
+                search_form_selector, numpr_select_selector, search_btn_selector,
             )
             filepath = save_to_json(list_data, domain, "list_all")
-            return {"ok": True, "total_count": len(list_data), "is_stopped_early": app.state.stop_scraping, "data": list_data, "saved_file": filepath}
+            return {"ok": True, "total_count": len(list_data), "saved_file": filepath, "is_stopped_early": app.state.stop_scraping, "req_id": req_id, "type": type, "crw_id": crw_id, "data": list_data}
         except Exception as e:
             print(f"[!] 리스트 수집 에러: {e}", flush=True)
             filepath = save_to_json(list_data, domain, "list_error_partial")
-            return {"ok": False, "error_msg": str(e), "data": list_data, "saved_file": filepath}
+            return {"ok": False, "error_msg": str(e), "saved_file": filepath, "req_id": req_id, "type": type, "crw_id": crw_id, "data": list_data}
         finally:
             await browser.close()
 
@@ -577,8 +585,14 @@ async def api_scrape_view(
     list_class: str = Query("table.board_list", description="리스트 테이블 셀렉터"),
     view_class: str = Query("table.board_view", description="상세 테이블 셀렉터"),
     max_pages: str = Query("", description="수집 페이지 수 (공백/0=전체)"),
-    paging_selector: str = Query(".pagination, .paging, #pagingNav", description="페이징 영역 셀렉터"),
-    next_btn_selector: str = Query(".num_right, .next, [title='다음'], .btn-next", description="다음 블록 버튼 셀렉터")
+    paging_selector: str = Query("div%23pagingNav, div%23pagingNew", description="페이징 영역 셀렉터 (ex: div.paging)"),
+    next_btn_selector: str = Query("a.num_right, a.next, a[title='다음'], .btn-next", description="다음 버튼 셀렉터 (ex: a.next)"),
+    search_form_selector: str = Query("form%23search_form", description="검색 폼 셀렉터"),
+    numpr_select_selector: str = Query("select%23th_sch", description="대수 선택 셀렉터"),
+    search_btn_selector: str = Query("button.btn.blue, button[type='submit'], #btnSearch, .btn_search", description="검색 버튼 셀렉터"),
+    req_id: str = Query("", description="요청 ID (yyyyMMddHHmmssSSS)"),
+    type: str = Query("", description="구분 (의안, 회의록 등)"),
+    crw_id: str = Query("", description="수집 설정 ID")
 ):
     app.state.stop_scraping = False
     domain = extract_domain(list_url)
@@ -592,7 +606,8 @@ async def api_scrape_view(
             list_data = await _collect_pages(
                 page, list_url, rasmbly_numpr, list_class, view_id_param,
                 max_pages, paging_selector, next_btn_selector,
-                UniversalCrawler.extract_list_page, lambda: app.state.stop_scraping
+                UniversalCrawler.extract_list_page, lambda: app.state.stop_scraping,
+                search_form_selector, numpr_select_selector, search_btn_selector,
             )
 
             # 2단계: 상세 뷰 수집
@@ -625,11 +640,11 @@ async def api_scrape_view(
 
             filepath = save_to_json(view_data, domain, "view_all")
             return {"ok": True, "domain": domain, "saved_file": filepath, "total_count": len(view_data),
-                    "is_stopped_early": app.state.stop_scraping, "data": view_data}
+                    "is_stopped_early": app.state.stop_scraping, "req_id": req_id, "type": type, "crw_id": crw_id,"data": view_data}
         except Exception as e:
             filepath = save_to_json(view_data, domain, "view_error_partial")
             return {"ok": False, "error_msg": str(e), "saved_file": filepath,
-                    "is_stopped_early": app.state.stop_scraping, "data": view_data}
+                    "is_stopped_early": app.state.stop_scraping, "req_id": req_id, "type": type, "crw_id": crw_id,"data": view_data}
         finally:
             await browser.close()
 
@@ -645,8 +660,3 @@ async def api_stop():
     app.state.stop_scraping = True
     print("[!] 외부 중단 요청 수신", flush=True)
     return {"ok": True, "message": "Stop requested. Current process will halt and save progress."}
-
-
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="0.0.0.0", port=8900)

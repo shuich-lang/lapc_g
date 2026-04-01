@@ -10,7 +10,7 @@ FIELD_MAP = {
     "대표 발의자": "PROPSR", "대표발의": "PROPSR", "대표 발의 의원": "PROPSR",
     "발의자": "PROPSR", "발의 의원": "PROPSR", "발의의원": "PROPSR",
     "제안(발의)자": "PROPSR", "공동발의자": "PROPSR", "제안자": "PROPSR",
-    "공동 발의 의원": "PROPSR", "공동발의의원": "PROPSR", "발의(제출)자": "PROPSR",
+    "공동 발의 의원": "PROPSR", "공동발의의원": "PROPSR", "발의(제출)자": "PROPSR", "발의(제안)자": "PROPSR",
     "발의일": "ITNC_DE", "발의 일자": "ITNC_DE", "제안일": "ITNC_DE",
     "제안 일자": "ITNC_DE", "제안일자": "ITNC_DE",
     "발의(제출)일자": "ITNC_DE", "발의(제출)일": "ITNC_DE",
