@@ -471,15 +471,27 @@ class UniversalCrawler:
 
     @staticmethod
     async def get_total_pages(page: Page) -> int:
-        """마지막 페이지 번호 탐지 (last 버튼 -> 숫자 버튼 최대값)"""
+        """마지막 페이지 번호 탐지 (href 및 onclick 속성 모두 분석)"""
         try:
+            # 마지막 페이지 버튼 셀렉터 확장
             btn = await page.query_selector("a.last, a.num_last, a[title*='마지막'], a.btn-last, a.direction.last")
             if btn:
+                # 1. href 속성 확인
                 href = await btn.get_attribute("href") or ""
-                m = re.search(PAGE_PARAM_PATTERN, href, re.IGNORECASE)
-                if m: return int(m.group(2))
+                # 2. onclick 속성 확인 (구로구의회 케이스)
+                onclick = await btn.get_attribute("onclick") or ""
+                
+                combined_text = f"{href} {onclick}"
+                
+                # 숫자 추출 정규식 (fn_egov_link_page(65) 또는 pageIndex=65 등 대응)
+                m = re.search(r'(?:fn_egov_link_page|pageIndex|page)\s*[\(=]\s*[\'"]?(\d+)[\'"]?', combined_text, re.IGNORECASE)
+                if m: return int(m.group(1))
+                
+                # 기본 패턴 재시도
                 m = re.search(r'=(\d+)$', href)
                 if m: return int(m.group(1))
+
+            # 버튼이 없으면 현재 보이는 숫자 중 최대값
             mx = 1
             for b in await page.query_selector_all(".paging a, .pagination a, #pagingNav a"):
                 t = (await b.inner_text()).strip()
