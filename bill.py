@@ -2,11 +2,14 @@
 import json
 import os
 import re
+import httpx
+import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin, urlparse
-
-from fastapi import FastAPI, Query, Request
+from pydantic import BaseModel, Field
+from typing import Optional
+from fastapi import FastAPI, Depends, Request
 from playwright.async_api import async_playwright, Page
 
 try:
@@ -29,6 +32,24 @@ VIEW_ID_AUTO_PARAMS = r"[?&](uid|idx|code|no|seq|id|bill_no|billNo|idx_no|nttId|
 PAGE_PARAM_PATTERN = r'([?&](?:page|pageIndex|p|page_no|pageno|cPage|pageNum|page_id))=(\d+)'
 # 검색 버튼 함정 단어 (상단 메뉴 탭 배제용)
 TRAP_WORDS = ["엑셀", "초기화", "취소", "통합", "메뉴", "상세", "회기", "의안", "별검색", "다운", "연혁"]
+
+class ScrapeRequest(BaseModel):
+    list_url: str = Field(..., description="의회 리스트 URL")
+    view_url: Optional[str] = Field(None, description="상세 진입 URL")
+    view_id_param: str = Field("uuid", description="상세 식별 파라미터명")
+    rasmbly_numpr: str = Field("", description="대수 (공백=전체)")
+    list_class: str = Field("table.board_list", description="리스트 테이블 셀렉터")
+    view_class: Optional[str] = Field(None, description="상세 테이블 셀렉터")
+    max_pages: str = Field("", description="수집 페이지 수 (공백/0=전체)")
+    paging_selector: str = Field("div#pagingNav, div#pagingNew", description="페이징 영역 셀렉터")
+    next_btn_selector: str = Field("a.num_right, a.next, a[title='다음'], .btn-next", description="다음 버튼 셀렉터")
+    end_btn_selector: str = Field("a.end, a.last, a.num_last, a.btn-last, a.direction.last, a.btn.end", description="마지막 페이지 버튼 셀렉터")
+    search_form_selector: str = Field("form#search_form", description="검색 폼 셀렉터")
+    numpr_select_selector: str = Field("select#th_sch", description="대수 선택 셀렉터")
+    search_btn_selector: str = Field("button.btn.blue, button[type='submit'], #btnSearch, .btn_search", description="검색 버튼 셀렉터")
+    req_id: str = Field("", description="요청 ID")
+    type: str = Field("", description="구분 (의안, 회의록 등)")
+    crw_id: str = Field("", description="수집 설정 ID")
 
 
 # --- 유틸리티 ---
@@ -102,7 +123,7 @@ async def _setup_browser(pw):
     return browser, page
 
 async def _collect_pages(page, list_url, numpr, list_class, vid_param,
-                         max_pages, paging_sel, next_btn_sel, extractor, stop_check, search_form_selector, numpr_select_selector, search_btn_selector):
+                         max_pages, paging_sel, next_btn_sel, end_btn_sel, extractor, stop_check, search_form_selector, numpr_select_selector, search_btn_selector):
     """공통 리스트 수집 루프 (필터 + 페이지네이션)"""
     await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
     
@@ -113,7 +134,7 @@ async def _collect_pages(page, list_url, numpr, list_class, vid_param,
         # 검색 안 할 때도 리스트는 기다려야 함
         await page.wait_for_selector(normalize_selector(list_class), timeout=10000)
 
-    total = await UniversalCrawler.get_total_pages(page)
+    total = await UniversalCrawler.get_total_pages(page, end_btn_sel)
     safe_max = int(max_pages.strip()) if max_pages and max_pages.strip().isdigit() else 0
     target = total if safe_max == 0 else min(safe_max, total)
     data = []
@@ -240,61 +261,6 @@ class UniversalCrawler:
         return info
 
     @staticmethod
-    async def scrape_list_page(page: Page, list_class: str, view_id_param: str = "code") -> List[Dict[str, Any]]:
-        """목록 파싱: thead 2차원 그리드 → 필드 매핑"""
-        selector = normalize_selector(list_class)
-        await page.wait_for_selector(selector, timeout=10000)
-
-        # thead 헤더 그리드 구축 (colspan/rowspan 대응)
-        thead_rows = await page.query_selector_all(f"{selector} thead tr")
-        col_keys = []
-        if thead_rows:
-            grid, max_cols = {}, 0
-            for ri, tr in enumerate(thead_rows):
-                ci = 0
-                for th in await tr.query_selector_all("th, td"):
-                    while grid.get((ri, ci)): ci += 1
-                    text = clean_text(await th.inner_text())
-                    cs = int(await th.get_attribute("colspan") or 1)
-                    rs = int(await th.get_attribute("rowspan") or 1)
-                    for i in range(rs):
-                        for j in range(cs):
-                            grid[(ri + i, ci + j)] = text
-                    ci += cs
-                    max_cols = max(max_cols, ci)
-            for c in range(max_cols):
-                parts = []
-                for r in range(len(thead_rows)):
-                    v = grid.get((r, c))
-                    if v and v not in parts: parts.append(v)
-                col_keys.append(get_mapped_key(parts[-1], parts[0] if len(parts) > 1 else None) if parts else f"UNKNOWN_{c}")
-
-        # tbody 행 파싱
-        items = []
-        for row in await page.query_selector_all(f"{selector} tbody tr, {selector} ul > li, {selector} .list_row"):
-            tds = await row.query_selector_all("td") or await row.query_selector_all("div, span")
-            if not tds: continue
-            item = {}
-            if col_keys:
-                for i, td in enumerate(tds):
-                    if i >= len(col_keys): break
-                    key, val = col_keys[i], clean_text(await td.inner_text())
-                    if not val: continue
-                    if key == "PROPSR": val = ", ".join(v for v in val.split() if v)
-                    item[key] = f"{item[key]}, {val}" if key in item and item[key] else val
-
-            link = await UniversalCrawler._get_row_link(row, tds)
-            if link["bi_sj"]: item["BI_SJ"] = link["bi_sj"]
-            href = link["href"]
-            is_real = href and not href.startswith(("javascript", "#"))
-            item["link_href"] = href.replace("&amp;", "&") if is_real else (href or link["onclick"])
-
-            vid = UniversalCrawler._extract_view_id(href, link["onclick"], await row.inner_html(), view_id_param)
-            if vid: item["view_id"] = vid
-            items.append(item)
-        return items
-
-    @staticmethod
     async def extract_list_page(page: Page, list_class: str, view_id_param: str = "code") -> List[Dict[str, Any]]:
         """경량 목록 추출: ID/링크 중심 (상세 진입용)"""
         selector = normalize_selector(list_class)
@@ -319,10 +285,9 @@ class UniversalCrawler:
         selector = normalize_selector(view_class)
         await page.wait_for_selector(selector, timeout=10000)
 
-        result = {"sections": {}}
+        result = {}
         section, rs_counter = None, 0
 
-        # 셀렉터 확장: tbody tr 뿐만 아니라 ul > li 도 탐색
         rows = await page.query_selector_all(f"{selector} tbody tr, {selector} > li, {selector} .view_row")
 
         for row in rows:
@@ -330,14 +295,11 @@ class UniversalCrawler:
                 if rs_counter > 0: rs_counter -= 1
                 if rs_counter == 0: section = None
 
-                # [수정 포인트 1] 원주시 같은 LI 구조(strong/span)와 기존 Table 구조(th/td) 통합 추출
                 ths = await row.query_selector_all("th, dt, strong, .label, .title")
                 tds = await row.query_selector_all("td, dd, span, .value, .cont")
                 pairs = []
 
-                # [수정 포인트 2] 데이터가 없는 row 스킵 방지 및 매핑
                 if not ths and tds:
-                    # 텍스트가 있는 첫 번째 요소만 본문으로 취급
                     text_content = clean_text(await tds[0].inner_text())
                     if text_content:
                         html = await tds[0].inner_html()
@@ -346,7 +308,6 @@ class UniversalCrawler:
                 else:
                     ti, di = 0, 0
                     while ti < len(ths) and di < len(tds):
-                        # rowspan 처리 (기존 로직 유지)
                         rs = await ths[ti].get_attribute("rowspan")
                         th_text = clean_text(await ths[ti].inner_text())
                         
@@ -359,36 +320,24 @@ class UniversalCrawler:
                         pairs.append((th_text, tds[di]))
                         ti += 1; di += 1
 
-                # 데이터 가공 및 저장 (기존 로직 동일)
                 for label, td_el in pairs:
                     val = clean_text(await td_el.inner_text())
-                    # 원주시는 의안명 옆에 바로 파일이 있으므로 label에 '의안명'이 포함되어도 체크
                     is_file = any(x in label for x in ["첨부", "파일", "원문", "의안명"]) 
                     is_meeting = "회의록" in label
 
                     if is_file or is_meeting:
                         names, urls = await UniversalCrawler._extract_attachments(td_el, page, base_url, is_file)
-                        # 파일 저장 로직
                         if is_file and names:
                             result["BI_FILE_NM"] = names[0] if len(names) == 1 else names
                             result["BI_FILE_URL"] = urls[0] if len(urls) == 1 else urls
-                        # (중략 - 회의록 및 섹션 매핑 로직)
-                        if not is_file: # 파일이 아닌 경우에만 일반 매핑 (원주시는 의안명 텍스트도 보존)
-                            pass
                     
-                    # 일반 텍스트 매핑
                     mapped = get_mapped_key(label, section)
-                    if section:
-                        sec = "위원회" if "위원회" in section else ("본회의" if "본회의" in section else section)
-                        result["sections"].setdefault(sec, {})[mapped] = val
-                    else:
-                        result[mapped] = val
+                    result[mapped] = val
 
             except Exception as e:
                 print(f"[-] row 파싱 에러: {e}", flush=True)
                 continue
 
-        if not result.get("sections"): result.pop("sections", None)
         return result
 
     @staticmethod
@@ -470,33 +419,45 @@ class UniversalCrawler:
         return names, urls
 
     @staticmethod
-    async def get_total_pages(page: Page) -> int:
-        """마지막 페이지 번호 탐지 (href 및 onclick 속성 모두 분석)"""
+    async def get_total_pages(page: Page, end_btn_selector: str = None) -> int:
         try:
-            # 마지막 페이지 버튼 셀렉터 확장
-            btn = await page.query_selector("a.last, a.num_last, a[title*='마지막'], a.btn-last, a.direction.last")
-            if btn:
-                # 1. href 속성 확인
-                href = await btn.get_attribute("href") or ""
-                # 2. onclick 속성 확인 (구로구의회 케이스)
-                onclick = await btn.get_attribute("onclick") or ""
-                
-                combined_text = f"{href} {onclick}"
-                
-                # 숫자 추출 정규식 (fn_egov_link_page(65) 또는 pageIndex=65 등 대응)
-                m = re.search(r'(?:fn_egov_link_page|pageIndex|page)\s*[\(=]\s*[\'"]?(\d+)[\'"]?', combined_text, re.IGNORECASE)
-                if m: return int(m.group(1))
-                
-                # 기본 패턴 재시도
-                m = re.search(r'=(\d+)$', href)
-                if m: return int(m.group(1))
+            ex_selectors = [
+                "a.last", "a.num_last", "a.btn-last", "a.direction.last",
+                "a.btn.end", "a.btn.next", "a.next",
+                "a[title*='마지막']", "a[onclick*='Retrieve']", 
+                "a.l_font", "a:has-text('»')", "a:has-text('>>')"
+            ]
 
-            # 버튼이 없으면 현재 보이는 숫자 중 최대값
+            if end_btn_selector:
+                # 리스트 중복 방지 및 사용자 셀렉터 우선
+                unique_selectors = [end_btn_selector] + [s for s in ex_selectors if s != end_btn_selector]
+            else:
+                unique_selectors = ex_selectors
+            
+            btn_candidates = await page.query_selector_all(", ".join(unique_selectors))
+            
+            for btn in reversed(btn_candidates):
+                href = await btn.get_attribute("href") or ""
+                onclick = await btn.get_attribute("onclick") or ""
+                text = await btn.inner_text() or ""
+                
+                combined = f"{href} {onclick} {text}"
+                
+                m = re.search(r'(?:fn[a-zA-Z_]*|pageIndex|pageNum|pageNo|page|go|move|schPageNo)\s*[\(=]\s*[\'"]?(\d+)[\'"]?', combined, re.IGNORECASE)
+                
+                if m:
+                    total = int(m.group(1))
+                    if total > 1: return total
+
+            # 2. 버튼으로 못 찾았을 경우, 현재 보이는 숫자 중 최대값 (Fallback)
             mx = 1
-            for b in await page.query_selector_all(".paging a, .pagination a, #pagingNav a"):
+            paging_links = await page.query_selector_all(".paging a, .pagination a, #pagingNav a, .paging strong")
+            for b in paging_links:
                 t = (await b.inner_text()).strip()
-                if t.isdigit(): mx = max(mx, int(t))
+                if t.isdigit():
+                    mx = max(mx, int(t))
             return mx
+
         except Exception as e:
             print(f"[-] 페이지 수 탐지 실패 (기본 1): {e}", flush=True)
             return 1
@@ -524,7 +485,6 @@ class UniversalCrawler:
             link = page.locator(p_sel).get_by_text(re.compile(f"^{next_page}$"), exact=True).first
             
             if await link.count() > 0:
-                print(f"[*] 페이지 번호 클릭: {next_page}p (Selector: {p_sel})", flush=True)
                 await link.click()
                 await page.wait_for_load_state("domcontentloaded")
                 return True
@@ -542,124 +502,119 @@ class UniversalCrawler:
         
         return False
 
-
-# --- API 엔드포인트 ---
-
-@app.get("/crawl/billList")
-async def api_scrape_list(
-    request: Request,
-    list_url: str = Query(..., description="의회 리스트 URL"),
-    view_url: Optional[str] = Query(None, description="상세 진입 URL"),
-    view_id_param: str = Query("uuid", description="상세 식별 파라미터명"),
-    rasmbly_numpr: str = Query("", description="대수 (공백=전체)"),
-    list_class: str = Query("table.board_list", description="리스트 테이블 셀렉터"),
-    view_class: Optional[str] = Query(None, description="상세 테이블 셀렉터"),
-    max_pages: str = Query("", description="수집 페이지 수 (공백/0=전체)"),
-    paging_selector: str = Query("div%23pagingNav, div%23pagingNew", description="페이징 영역 셀렉터 (ex: div.paging)"),
-    next_btn_selector: str = Query("a.num_right, a.next, a[title='다음'], .btn-next", description="다음 버튼 셀렉터 (ex: a.next)"),
-    search_form_selector: str = Query("form%23search_form", description="검색 폼 셀렉터"),
-    numpr_select_selector: str = Query("select%23th_sch", description="대수 선택 셀렉터"),
-    search_btn_selector: str = Query("button.btn.blue, button[type='submit'], #btnSearch, .btn_search", description="검색 버튼 셀렉터"),
-    req_id: str = Query("", description="요청 ID (yyyyMMddHHmmssSSS)"),
-    type: str = Query("", description="구분 (의안, 회의록 등)"),
-    crw_id: str = Query("", description="수집 설정 ID")
-):
+# --- 공통 실행 엔진 (Service Layer) ---
+async def execute_view_scraping(req: ScrapeRequest):
     app.state.stop_scraping = False
-    domain = extract_domain(list_url)
-    list_data = []
-
-    async with async_playwright() as p:
-        browser, page = await _setup_browser(p)
-        try:
-            print(f"[*] 리스트 수집 시작: {list_url}", flush=True)
-            list_data = await _collect_pages(
-                page, list_url, rasmbly_numpr, list_class, view_id_param,
-                max_pages, paging_selector, next_btn_selector,
-                UniversalCrawler.scrape_list_page, lambda: app.state.stop_scraping,
-                search_form_selector, numpr_select_selector, search_btn_selector,
-            )
-            filepath = save_to_json(list_data, domain, "list_all")
-            return {"ok": True, "total_count": len(list_data), "saved_file": filepath, "is_stopped_early": app.state.stop_scraping, "req_id": req_id, "type": type, "crw_id": crw_id, "data": list_data}
-        except Exception as e:
-            print(f"[!] 리스트 수집 에러: {e}", flush=True)
-            filepath = save_to_json(list_data, domain, "list_error_partial")
-            return {"ok": False, "error_msg": str(e), "saved_file": filepath, "req_id": req_id, "type": type, "crw_id": crw_id, "data": list_data}
-        finally:
-            await browser.close()
-
-
-@app.get("/crawl/bill")
-async def api_scrape_view(
-    list_url: str = Query(..., description="의회 리스트 URL"),
-    view_url: str = Query(..., description="상세 진입 URL"),
-    view_id_param: str = Query("uuid", description="상세 식별 파라미터명"),
-    rasmbly_numpr: str = Query("", description="대수 (공백=전체)"),
-    list_class: str = Query("table.board_list", description="리스트 테이블 셀렉터"),
-    view_class: str = Query("table.board_view", description="상세 테이블 셀렉터"),
-    max_pages: str = Query("", description="수집 페이지 수 (공백/0=전체)"),
-    paging_selector: str = Query("div%23pagingNav, div%23pagingNew", description="페이징 영역 셀렉터 (ex: div.paging)"),
-    next_btn_selector: str = Query("a.num_right, a.next, a[title='다음'], .btn-next", description="다음 버튼 셀렉터 (ex: a.next)"),
-    search_form_selector: str = Query("form%23search_form", description="검색 폼 셀렉터"),
-    numpr_select_selector: str = Query("select%23th_sch", description="대수 선택 셀렉터"),
-    search_btn_selector: str = Query("button.btn.blue, button[type='submit'], #btnSearch, .btn_search", description="검색 버튼 셀렉터"),
-    req_id: str = Query("", description="요청 ID (yyyyMMddHHmmssSSS)"),
-    type: str = Query("", description="구분 (의안, 회의록 등)"),
-    crw_id: str = Query("", description="수집 설정 ID")
-):
-    app.state.stop_scraping = False
-    domain = extract_domain(list_url)
+    domain = extract_domain(req.list_url)
     list_data, view_data = [], []
-
+    
     async with async_playwright() as p:
         browser, page = await _setup_browser(p)
         try:
             # 1단계: 리스트 수집
-            print(f"[*] [1단계] 리스트 수집: {list_url}", flush=True)
+            print(f"\n{'='*60}", flush=True)
+            print(f"[*] [1단계] 리스트 수집 시작: {req.list_url}", flush=True)
             list_data = await _collect_pages(
-                page, list_url, rasmbly_numpr, list_class, view_id_param,
-                max_pages, paging_selector, next_btn_selector,
+                page, req.list_url, req.rasmbly_numpr, req.list_class, req.view_id_param,
+                req.max_pages, req.paging_selector, req.next_btn_selector, req.end_btn_selector,
                 UniversalCrawler.extract_list_page, lambda: app.state.stop_scraping,
-                search_form_selector, numpr_select_selector, search_btn_selector,
+                req.search_form_selector, req.numpr_select_selector, req.search_btn_selector,
             )
 
-            # 2단계: 상세 뷰 수집
+            # 2단계: 상세 뷰 수집 루프
             total = len(list_data)
-            print(f"[*] [2단계] 상세 뷰 {total}건 수집 시작", flush=True)
+            print(f"\n[*] [2단계] 상세 수집 시작 (총 {total}건)", flush=True)
+            print(f"{'-'*60}", flush=True)
 
             for idx, item in enumerate(list_data):
                 if app.state.stop_scraping:
-                    print(f"[!] 중단 요청: {idx}번째에서 중단", flush=True)
+                    print(f"\n[!] 중단 요청 감지: {idx+1}번째에서 멈춤", flush=True)
                     break
 
                 vid = item.get("view_id")
                 if not vid: continue
 
+                print(f"[*] 상세 ({idx+1}/{total}) ID: {vid}", flush=True)
+
                 href = item.get("link_href", "")
                 is_real = href and not href.startswith(("#", "javascript"))
-                target_url = urljoin(list_url, href) if is_real else f"{view_url}{'&' if '?' in view_url else '?'}{view_id_param}={vid}"
+                target_url = urljoin(req.list_url, href) if is_real else f"{req.view_url}{'&' if '?' in req.view_url else '?'}{req.view_id_param}={vid}"
 
-                print(f"[*] 상세 ({idx+1}/{total}) ID: {vid}", flush=True)
                 try:
+                    # 페이지 이동 및 데이터 추출 (내부 로그는 들여쓰기 되어 출력됨)
                     await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+                    
                     parsed = urlparse(target_url)
                     base = f"{parsed.scheme}://{parsed.netloc}"
-                    detail = await UniversalCrawler.extract_view_detail(page, view_class, base)
-                    sections = detail.pop("sections", {})
-                    view_data.append({"view_id": vid, "view_url": target_url, **detail, "sections": sections})
+                    
+                    detail = await UniversalCrawler.extract_view_detail(page, req.view_class, base)
+                    
+                    view_data.append({"view_id": vid, "view_url": target_url, **detail})
+                    
                 except Exception as e:
-                    print(f"[!] {vid} 상세 실패: {e}", flush=True)
+                    print(f"    [!] ID: {vid} 수집 실패: {e}", flush=True)
                     view_data.append({"view_id": vid, "view_url": target_url, "view_error": str(e)})
 
+            # 저장 및 요약
             filepath = save_to_json(view_data, domain, "view_all")
-            return {"ok": True, "domain": domain, "saved_file": filepath, "total_count": len(view_data),
-                    "is_stopped_early": app.state.stop_scraping, "req_id": req_id, "type": type, "crw_id": crw_id,"data": view_data}
+            print(f"[OK] 전체 수집 완료: {len(view_data)}건", flush=True)
+
+            # [핵심] 외부 API 전송 실행
+            # req_id: 날짜포맷(전달받은값 사용), type: bill, crw_id: 전달받은값
+            api_success = await send_to_insert_api(
+                req_id=req.req_id,
+                type_val=req.type,
+                crw_id=req.crw_id,
+                data_list=view_data
+            )
+
+            return {"ok": True, "data": view_data, "saved_file": filepath}
+
         except Exception as e:
-            filepath = save_to_json(view_data, domain, "view_error_partial")
-            return {"ok": False, "error_msg": str(e), "saved_file": filepath,
-                    "is_stopped_early": app.state.stop_scraping, "req_id": req_id, "type": type, "crw_id": crw_id,"data": view_data}
+            print(f"\n[!] 상세 수집 전체 에러: {e}", flush=True)
+            return {"ok": False, "error_msg": str(e)}
         finally:
             await browser.close()
 
+async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, data_list: list):
+    target_url = "http://192.168.12.138:18123/insert_api.do" # 현재 로컬 테스트 중이시니 localhost
+    
+    # [중요] 자바 코드의 필드명(reqId, type, agency 등)과 일치시켜야 합니다.
+    # 자바 코드에서 manpaMap.get("reqId"), manpaMap.get("agency")를 체크하고 있습니다.
+    payload = {
+        "reqId": req_id,      # req_id -> reqId (자바 필드명 대응)
+        "type": type_val,
+        "agency": crw_id,     # crw_id -> agency (자바 필드명 대응)
+        "data": data_list     # json.dumps 할 필요 없이 리스트 그대로 전달
+    }
+
+    print(f"\n[*] [3단계] 데이터 전송 시도 (JSON 방식)", flush=True)
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            # json=payload 를 사용하면 자동으로 JSON Body 전송 및 헤더가 설정됩니다.
+            response = await client.post(target_url, json=payload, timeout=60.0)
+            
+            if response.status_code == 200:
+                print(f"[OK] API 전송 성공", flush=True)
+                return True
+            else:
+                # 404가 뜬다면 URL 경로(/insert_api.do)나 서버 기동 여부를 다시 확인해야 합니다.
+                print(f"[!] 전송 완료 (Status: {response})", flush=True)
+                return False
+        except Exception as e:
+            print(f"[!] 네트워크 오류: {str(e)}", flush=True)
+            return False
+
+# --- API 엔드포인트 ---
+# [상세 수집] GET & POST
+@app.get("/crawl/bill")
+async def api_get_bill_view(req: ScrapeRequest = Depends()):
+    return await execute_view_scraping(req)
+
+@app.post("/crawl/bill")
+async def api_post_bill_view(req: ScrapeRequest):
+    return await execute_view_scraping(req)
 
 @app.get("/crawl/bill/status")
 async def api_status(job_id: str):
@@ -671,4 +626,4 @@ async def api_stop():
     """크롤링 루프 즉시 중단"""
     app.state.stop_scraping = True
     print("[!] 외부 중단 요청 수신", flush=True)
-    return {"ok": True, "message": "Stop requested. Current process will halt and save progress."}
+    return {"ok": True, "message": "Stop requested. Current process will halt and save progress."} 
