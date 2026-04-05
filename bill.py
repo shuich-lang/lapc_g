@@ -406,7 +406,6 @@ class UniversalCrawler:
                         url_val = urljoin(base_url, url_val)
 
                     # Context Destroyed 방지용 복구: URL이 변했다면 다시 돌아옴
-                    # 평택시 같은 경우 폼 전송 실패 시 빈 페이지가 남을 수 있음
                     if page.url != base_url:
                         try:
                             await page.goto(base_url, wait_until="domcontentloaded", timeout=5000)
@@ -481,7 +480,6 @@ class UniversalCrawler:
 
         try:
             # [수정] p_sel 영역 내부의 '텍스트가 해당 숫자인' 요소를 찾음 (a 태그 제약 제거)
-            # 이렇게 하면 <a>2</a> 뿐만 아니라 <button>2</button> 도 클릭 가능합니다.
             link = page.locator(p_sel).get_by_text(re.compile(f"^{next_page}$"), exact=True).first
             
             if await link.count() > 0:
@@ -559,8 +557,6 @@ async def execute_view_scraping(req: ScrapeRequest):
             filepath = save_to_json(view_data, domain, "view_all")
             print(f"[OK] 전체 수집 완료: {len(view_data)}건", flush=True)
 
-            # [핵심] 외부 API 전송 실행
-            # req_id: 날짜포맷(전달받은값 사용), type: bill, crw_id: 전달받은값
             api_success = await send_to_insert_api(
                 req_id=req.req_id,
                 type_val=req.type,
@@ -568,24 +564,22 @@ async def execute_view_scraping(req: ScrapeRequest):
                 data_list=view_data
             )
 
-            return {"ok": True, "data": view_data, "saved_file": filepath}
+            return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id, "ok": True, "data": view_data, "saved_file": filepath}
 
         except Exception as e:
             print(f"\n[!] 상세 수집 전체 에러: {e}", flush=True)
-            return {"ok": False, "error_msg": str(e)}
+            return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id, "ok": False, "error_msg": str(e)}
         finally:
             await browser.close()
 
 async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, data_list: list):
-    target_url = "http://192.168.12.138:18123/insert_api.do" # 현재 로컬 테스트 중이시니 localhost
+    target_url = "http://192.168.12.138:18123/insert_api.do"
     
-    # [중요] 자바 코드의 필드명(reqId, type, agency 등)과 일치시켜야 합니다.
-    # 자바 코드에서 manpaMap.get("reqId"), manpaMap.get("agency")를 체크하고 있습니다.
     payload = {
-        "reqId": req_id,      # req_id -> reqId (자바 필드명 대응)
+        "reqId": req_id,
         "type": type_val,
-        "agency": crw_id,     # crw_id -> agency (자바 필드명 대응)
-        "data": data_list     # json.dumps 할 필요 없이 리스트 그대로 전달
+        "agency": crw_id,
+        "data": data_list
     }
 
     print(f"\n[*] [3단계] 데이터 전송 시도 (JSON 방식)", flush=True)
