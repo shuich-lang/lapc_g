@@ -59,8 +59,9 @@ class MinutesParam(BaseModel):
 
 
 class RegexItem(BaseModel):
-	title: str = Field(..., description="응답 key 이름")
-	regex: str = Field(..., description="상세 HTML에서 추출할 정규식")
+	col: str = Field(..., description="응답 key 이름")
+	regex: list[str] = Field(..., description="상세 HTML에서 추출할 정규식")
+	xpath: Optional[str] = Field(None, description="(미구현) XPath 추출용 필드 - 향후 지원 예정")
 	remove_tags: str = Field(..., description="HTML 태그 제거 여부: Y | N")
 
 
@@ -509,18 +510,22 @@ def parse_minutes_detail_by_dynamic_regex(
 	result: dict[str, Optional[str]] = {}
 
 	for item in request.item:
-		key = normalize_text(item.title)
+		key = normalize_text(item.col)
 		if not key:
 			continue
 
-		regex_value = normalize_text(item.regex)
-
-		if regex_value.lower() == "list_title":
+		# regex 목록 중 "list_title" 예약어 체크
+		if len(item.regex) == 1 and normalize_text(item.regex[0]).lower() == "list_title":
 			value = normalize_text(list_title)
 			result[key] = value or None
 			continue
 
-		raw_value = apply_regex_raw(detail_html, item.regex)
+		# 정규식 목록을 순서대로 시도, 첫 매칭 결과 사용
+		raw_value = None
+		for pattern in item.regex:
+			raw_value = apply_regex_raw(detail_html, pattern)
+			if raw_value is not None:
+				break
 
 		if item.remove_tags == "Y":
 			result[key] = strip_html_tags(raw_value)
