@@ -7,9 +7,10 @@ import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin, urlparse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, ValidationInfo
 from typing import Optional
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI, Depends, Request, BackgroundTasks, HTTPException
+from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright, Page
 
 try:
@@ -33,7 +34,8 @@ PAGE_PARAM_PATTERN = r'([?&](?:page|pageIndex|p|page_no|pageno|cPage|pageNum|pag
 # 검색 버튼 함정 단어 (상단 메뉴 탭 배제용)
 TRAP_WORDS = ["엑셀", "초기화", "취소", "통합", "메뉴", "상세", "회기", "의안", "별검색", "다운", "연혁"]
 
-class ScrapeRequest(BaseModel):
+# 상세 파라미터
+class ScrapeParam(BaseModel):
     list_url: str = Field(..., description="의회 리스트 URL")
     view_url: Optional[str] = Field(None, description="상세 진입 URL")
     view_id_param: str = Field("uuid", description="상세 식별 파라미터명")
@@ -41,16 +43,34 @@ class ScrapeRequest(BaseModel):
     list_class: str = Field("table.board_list", description="리스트 테이블 셀렉터")
     view_class: Optional[str] = Field(None, description="상세 테이블 셀렉터")
     max_pages: str = Field("", description="수집 페이지 수 (공백/0=전체)")
-    paging_selector: str = Field("div#pagingNav, div#pagingNew", description="페이징 영역 셀렉터")
-    next_btn_selector: str = Field("a.num_right, a.next, a[title='다음'], .btn-next", description="다음 버튼 셀렉터")
-    end_btn_selector: str = Field("a.end, a.last, a.num_last, a.btn-last, a.direction.last, a.btn.end", description="마지막 페이지 버튼 셀렉터")
+    paging_selector: str = Field("div#pagingNav", description="페이징 영역 셀렉터")
+    next_btn_selector: str = Field("a.num_right", description="다음 버튼 셀렉터")
+    end_btn_selector: str = Field("a.num_last", description="마지막 페이지 버튼 셀렉터")
     search_form_selector: str = Field("form#search_form", description="검색 폼 셀렉터")
     numpr_select_selector: str = Field("select#th_sch", description="대수 선택 셀렉터")
-    search_btn_selector: str = Field("button.btn.blue, button[type='submit'], #btnSearch, .btn_search", description="검색 버튼 셀렉터")
-    req_id: str = Field("", description="요청 ID")
-    type: str = Field("", description="구분 (의안, 회의록 등)")
-    crw_id: str = Field("", description="수집 설정 ID")
+    search_btn_selector: str = Field("button.btn.blue", description="검색 버튼 셀렉터")
 
+# 메타 정보와 param을 포함하는 전체 요청 모델
+class ScrapeRequest(BaseModel):
+    req_id: str = Field(..., min_length=1, description="요청 식별자")
+    type: str = Field(..., min_length=1, description="수집 타입")
+    crw_id: str = Field(..., min_length=1, description="크롤러 식별자")
+    
+    # 중첩 구조 정의
+    param: ScrapeParam = Field(..., description="크롤링 상세 설정")
+
+    @field_validator('req_id', 'type', 'crw_id')
+    @classmethod
+    def not_empty(cls, v: str, info: ValidationInfo):
+        if not v or not v.strip():
+            raise ValueError(f"[{info.field_name}] 필수 파라미터가 비어있습니다.")
+        return v
+
+def error_response(msg: str):
+    return JSONResponse(
+        status_code=200, # 요청 자체는 성공으로 보되 로직상 실패 처리
+        content={"ok": False, "message": msg}
+    )
 
 # --- 유틸리티 ---
 
@@ -111,8 +131,7 @@ def get_mapped_key(label: str, section: Optional[str] = None) -> str:
         if mk.replace(" ", "") == normalized:
             return mv
     return label
-
-
+    
 # --- 브라우저 / 페이지네이션 헬퍼 ---
 
 async def _setup_browser(pw):
@@ -390,8 +409,8 @@ class UniversalCrawler:
                     final_name = raw if re.search(r'\.[a-zA-Z0-9]{2,4}$', raw) else f"{raw}{ext}"
                     final_name = re.sub(r'[\\/*?:"<>|]', "", final_name) # 파일명 정규화
                     
-                    save_path = os.path.join(FILE_DOWNLOAD_DIR, final_name)
-                    await download.save_as(save_path)
+                    #save_path = os.path.join(FILE_DOWNLOAD_DIR, final_name) # 테스트용으로 로컬 저장
+                    #await download.save_as(save_path) # 테스트용으로 로컬 저장
                     
                     print(f"[+] 다운로드 완료: {final_name}", flush=True)
                     raw = final_name
@@ -503,20 +522,22 @@ class UniversalCrawler:
 # --- 공통 실행 엔진 (Service Layer) ---
 async def execute_view_scraping(req: ScrapeRequest):
     app.state.stop_scraping = False
-    domain = extract_domain(req.list_url)
+    p = req.param
+    domain = extract_domain(p.list_url)
     list_data, view_data = [], []
+    filepath = None
     
-    async with async_playwright() as p:
-        browser, page = await _setup_browser(p)
+    async with async_playwright() as playwright:
+        browser, page = await _setup_browser(playwright)
         try:
             # 1단계: 리스트 수집
             print(f"\n{'='*60}", flush=True)
-            print(f"[*] [1단계] 리스트 수집 시작: {req.list_url}", flush=True)
+            print(f"[*] [1단계] 리스트 수집 시작: {p.list_url}", flush=True)
             list_data = await _collect_pages(
-                page, req.list_url, req.rasmbly_numpr, req.list_class, req.view_id_param,
-                req.max_pages, req.paging_selector, req.next_btn_selector, req.end_btn_selector,
+                page, p.list_url, p.rasmbly_numpr, p.list_class, p.view_id_param,
+                p.max_pages, p.paging_selector, p.next_btn_selector, p.end_btn_selector,
                 UniversalCrawler.extract_list_page, lambda: app.state.stop_scraping,
-                req.search_form_selector, req.numpr_select_selector, req.search_btn_selector,
+                p.search_form_selector, p.numpr_select_selector, p.search_btn_selector,
             )
 
             # 2단계: 상세 뷰 수집 루프
@@ -525,9 +546,10 @@ async def execute_view_scraping(req: ScrapeRequest):
             print(f"{'-'*60}", flush=True)
 
             for idx, item in enumerate(list_data):
+                # [/stop 요청 감지]
                 if app.state.stop_scraping:
-                    print(f"\n[!] 중단 요청 감지: {idx+1}번째에서 멈춤", flush=True)
-                    break
+                    print(f"\n[!] 중단 요청 감지: {idx}번째에서 상세 수집을 중단합니다.", flush=True)
+                    break # 루프를 탈출하여 하단의 저장/전송 로직으로 이동
 
                 vid = item.get("view_id")
                 if not vid: continue
@@ -536,35 +558,49 @@ async def execute_view_scraping(req: ScrapeRequest):
 
                 href = item.get("link_href", "")
                 is_real = href and not href.startswith(("#", "javascript"))
-                target_url = urljoin(req.list_url, href) if is_real else f"{req.view_url}{'&' if '?' in req.view_url else '?'}{req.view_id_param}={vid}"
+                
+                target_url = urljoin(p.list_url, href) if is_real else f"{p.view_url}{'&' if '?' in p.view_url else '?'}{p.view_id_param}={vid}"
 
                 try:
-                    # 페이지 이동 및 데이터 추출 (내부 로그는 들여쓰기 되어 출력됨)
                     await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
                     
                     parsed = urlparse(target_url)
                     base = f"{parsed.scheme}://{parsed.netloc}"
                     
-                    detail = await UniversalCrawler.extract_view_detail(page, req.view_class, base)
-                    
+                    detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base)
                     view_data.append({"view_id": vid, "view_url": target_url, **detail})
                     
                 except Exception as e:
                     print(f"    [!] ID: {vid} 수집 실패: {e}", flush=True)
                     view_data.append({"view_id": vid, "view_url": target_url, "view_error": str(e)})
 
-            # 저장 및 요약
-            filepath = save_to_json(view_data, domain, "view_all")
-            print(f"[OK] 전체 수집 완료: {len(view_data)}건", flush=True)
+            # --- 루프 종료 후 공통 처리 (정상 종료 또는 중단 시 모두 실행) ---
+            if view_data:
+                # 중단 여부에 따라 파일명 접미사 변경 (관리 편의성)
+                suffix = "interrupted" if app.state.stop_scraping else "view_all"
+                filepath = save_to_json(view_data, domain, suffix)
+                print(f"[OK] 데이터 저장 완료 ({len(view_data)}건): {filepath}", flush=True)
 
-            api_success = await send_to_insert_api(
-                req_id=req.req_id,
-                type_val=req.type,
-                crw_id=req.crw_id,
-                data_list=view_data
-            )
+                # CMS(Java) API 전송 (중단 시점까지의 데이터 전송)
+                print(f"[*] [3단계] 데이터 전송 시도...", flush=True)
+                await send_to_insert_api(
+                    req_id=req.req_id,
+                    type_val=req.type,
+                    crw_id=req.crw_id,
+                    data_list=view_data
+                )
+            else:
+                print(f"[!] 수집된 데이터가 없어 전송을 생략합니다.", flush=True)
 
-            return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id, "ok": True, "data": view_data, "saved_file": filepath}
+            return {
+                "req_id": req.req_id, 
+                "type": req.type, 
+                "crw_id": req.crw_id, 
+                "ok": True, 
+                "interrupted": app.state.stop_scraping,
+                "data_count": len(view_data), 
+                "saved_file": filepath
+            }
 
         except Exception as e:
             print(f"\n[!] 상세 수집 전체 에러: {e}", flush=True)
@@ -573,7 +609,8 @@ async def execute_view_scraping(req: ScrapeRequest):
             await browser.close()
 
 async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, data_list: list):
-    target_url = "http://192.168.12.138:18123/insert_api.do"
+    #target_url = "http://211.219.26.15:18123/insert_api.do"
+    target_url = "http://172.17.0.19:8080/insert_api.do"
     
     payload = {
         "reqId": req_id,
@@ -593,22 +630,46 @@ async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, data_list:
                 print(f"[OK] API 전송 성공", flush=True)
                 return True
             else:
-                # 404가 뜬다면 URL 경로(/insert_api.do)나 서버 기동 여부를 다시 확인해야 합니다.
-                print(f"[!] 전송 완료 (Status: {response})", flush=True)
+                print(f"[!] {target_url} 전송 완료 ", flush=True)
                 return False
         except Exception as e:
             print(f"[!] 네트워크 오류: {str(e)}", flush=True)
             return False
+        
+async def handle_scraping_request(req: ScrapeRequest, background_tasks: BackgroundTasks):
+    try:
+        # 실제 무거운 작업은 백그라운드 태스크로 등록
+        background_tasks.add_task(execute_view_scraping, req)
 
+        # 즉시 응답 반환
+        return {
+            "req_id": req.req_id,
+            "type": req.type,
+            "crw_id": req.crw_id,
+            "ok": True,
+            "message": "수집 요청 완료"
+        }
+    except Exception as e:
+        return error_response(f"요청 처리 중 오류 발생: {str(e)}")
+    
+# 공통 테스트 처리 로직
+async def handle_test_request(req: ScrapeRequest):
+    return {
+        "req_id": req.req_id,
+        "type": req.type,
+        "crw_id": req.crw_id,
+        "ok": True
+    }
+    
 # --- API 엔드포인트 ---
 # [상세 수집] GET & POST
 @app.get("/crawl/bill")
-async def api_get_bill_view(req: ScrapeRequest = Depends()):
-    return await execute_view_scraping(req)
+async def api_get_bill_view(background_tasks: BackgroundTasks, req: ScrapeRequest = Depends()):
+    return await handle_scraping_request(req, background_tasks)
 
 @app.post("/crawl/bill")
-async def api_post_bill_view(req: ScrapeRequest):
-    return await execute_view_scraping(req)
+async def api_post_bill_view(req: ScrapeRequest, background_tasks: BackgroundTasks):
+    return await handle_scraping_request(req, background_tasks)
 
 @app.get("/crawl/bill/status")
 async def api_status(job_id: str):
@@ -621,3 +682,11 @@ async def api_stop():
     app.state.stop_scraping = True
     print("[!] 외부 중단 요청 수신", flush=True)
     return {"ok": True, "message": "Stop requested. Current process will halt and save progress."} 
+
+@app.get("/crawl/test")
+async def api_get_test(req: ScrapeRequest = Depends()):
+    return await handle_test_request(req)
+
+@app.post("/crawl/test")
+async def api_post_test(req: ScrapeRequest):
+    return await handle_test_request(req)
