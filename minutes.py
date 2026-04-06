@@ -38,7 +38,7 @@ USER_AGENT = (
 	"Chrome/122.0.0.0 Safari/537.36"
 )
 
-CALLBACK_INSERT_API_URL = "http://lapc.landsoft.co.kr/insert_api.do"
+CALLBACK_INSERT_API_URL = "http://172.17.0.19:8080/insert_api.do"
 # CALLBACK_INSERT_API_URL = "http://localhost:9001/insert_api"
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
