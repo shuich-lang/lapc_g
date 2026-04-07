@@ -61,7 +61,7 @@ class MinutesParam(BaseModel):
 class RegexItem(BaseModel):
 	col: str = Field(..., description="응답 key 이름")
 	regex: list[str] = Field(..., description="상세 HTML에서 추출할 정규식")
-	xpath: Optional[str] = Field(None, description="(미구현) XPath 추출용 필드 - 향후 지원 예정")
+	xpath: list[str] = Field(None, description="(미구현) XPath 추출용 필드 - 향후 지원 예정")
 	remove_tags: str = Field(..., description="HTML 태그 제거 여부: Y | N")
 
 
