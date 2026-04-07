@@ -28,7 +28,7 @@ import json
 
 if sys.platform.startswith("win"):
 	asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
+ 
 app = FastAPI(title="Minutes Crawl API", version="0.8.0")
 
 
@@ -38,8 +38,10 @@ USER_AGENT = (
 	"Chrome/122.0.0.0 Safari/537.36"
 )
 
-CALLBACK_INSERT_API_URL = "http://172.17.0.19:8080/insert_api.do"
-# CALLBACK_INSERT_API_URL = "http://localhost:9001/insert_api"
+# CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"	
+# CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"		# 도커 내에서 cms 컨테이너 접근용
+# CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"			# python 내 json 저장
+CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
 
@@ -62,7 +64,7 @@ class RegexItem(BaseModel):
 	col: str = Field(..., description="응답 key 이름")
 	regex: list[str] = Field(..., description="상세 HTML에서 추출할 정규식")
 	xpath: list[str] = Field(None, description="(미구현) XPath 추출용 필드 - 향후 지원 예정")
-	remove_tags: str = Field(..., description="HTML 태그 제거 여부: Y | N")
+	removeTags: str = Field(..., description="HTML 태그 제거 여부: Y | N")
 
 
 class CrawlRequest(BaseModel):
@@ -403,11 +405,9 @@ def build_minutes_callback_payload(
 			data.append(item.fields)
 
 	return {
-		"type": request.type,
 		"req_id": request.req_id,
-		"crw_id": request.crw_id or generate_crw_id(),
-		"ok": "true",
-		"message": f"전체 색인 완료. 총 {len(data)}건 수집.",
+		"type": request.type,
+		"crw_id": request.crw_id,
 		"data": data,
 	}
 
@@ -527,7 +527,7 @@ def parse_minutes_detail_by_dynamic_regex(
 			if raw_value is not None:
 				break
 
-		if item.remove_tags == "Y":
+		if item.removeTags == "Y":
 			result[key] = strip_html_tags(raw_value)
 		else:
 			result[key] = normalize_text(raw_value)
