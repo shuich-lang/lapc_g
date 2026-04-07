@@ -3,8 +3,6 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from bill import app as bill_app
 from minutes import app as minutes_app
-from bill import execute_view_scraping  # 의안 실행 함수
-from minutes import run_minutes_all_and_callback  # 회의록 실행 함수
 
 router = APIRouter()
 
@@ -33,8 +31,9 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             background_tasks.add_task(execute_view_scraping, req_obj)
             
         elif req_type == "minutes":
-            from minutes import RegexCrawlRequest, run_minutes_all_and_callback
-            req_obj = RegexCrawlRequest(**json_data)
+            from minutes import CrawlRequest, run_minutes_all_and_callback, parse_crawl_request
+            raw = CrawlRequest(**json_data)
+            req_obj = parse_crawl_request(raw)
             background_tasks.add_task(run_minutes_all_and_callback, req_obj)
             
         else:
