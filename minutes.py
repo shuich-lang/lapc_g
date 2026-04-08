@@ -28,7 +28,7 @@ import json
 
 if sys.platform.startswith("win"):
 	asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
+ 
 app = FastAPI(title="Minutes Crawl API", version="0.8.0")
 
 
@@ -38,8 +38,10 @@ USER_AGENT = (
 	"Chrome/122.0.0.0 Safari/537.36"
 )
 
-CALLBACK_INSERT_API_URL = "http://lapc.landsoft.co.kr/insert_api.do"
-# CALLBACK_INSERT_API_URL = "http://localhost:9001/insert_api"
+CALLBACK_INSERT_API_URL = "http://10.201.38.150:8080/insert_api.do"		# 실제 CMS 서버 (도커 외부에서 접근용)
+# CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
+# CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
+# CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
 
@@ -59,9 +61,10 @@ class MinutesParam(BaseModel):
 
 
 class RegexItem(BaseModel):
-	title: str = Field(..., description="응답 key 이름")
-	regex: str = Field(..., description="상세 HTML에서 추출할 정규식")
-	remove_tags: str = Field(..., description="HTML 태그 제거 여부: Y | N")
+	col: str = Field(..., description="응답 key 이름")
+	regex: list[str] = Field(..., description="상세 HTML에서 추출할 정규식")
+	xpath: list[str] = Field(None, description="(미구현) XPath 추출용 필드 - 향후 지원 예정")
+	removeTags: str = Field(..., description="HTML 태그 제거 여부: Y | N")
 
 
 class CrawlRequest(BaseModel):
@@ -399,14 +402,14 @@ def build_minutes_callback_payload(
 
 	for item in crawl_response.items:
 		if item.fields:
-			data.append(item.fields)
+			row = dict(item.fields)
+			row["url"] = item.detail_url
+			data.append(row)
 
 	return {
-		"type": request.type,
 		"req_id": request.req_id,
-		"crw_id": request.crw_id or generate_crw_id(),
-		"ok": "true",
-		"message": f"전체 색인 완료. 총 {len(data)}건 수집.",
+		"type": request.type,
+		"crw_id": request.crw_id,
 		"data": data,
 	}
 
@@ -509,20 +512,24 @@ def parse_minutes_detail_by_dynamic_regex(
 	result: dict[str, Optional[str]] = {}
 
 	for item in request.item:
-		key = normalize_text(item.title)
+		key = normalize_text(item.col)
 		if not key:
 			continue
 
-		regex_value = normalize_text(item.regex)
-
-		if regex_value.lower() == "list_title":
+		# regex 목록 중 "list_title" 예약어 체크
+		if len(item.regex) == 1 and normalize_text(item.regex[0]).lower() == "list_title":
 			value = normalize_text(list_title)
 			result[key] = value or None
 			continue
 
-		raw_value = apply_regex_raw(detail_html, item.regex)
+		# 정규식 목록을 순서대로 시도, 첫 매칭 결과 사용
+		raw_value = None
+		for pattern in item.regex:
+			raw_value = apply_regex_raw(detail_html, pattern)
+			if raw_value is not None:
+				break
 
-		if item.remove_tags == "Y":
+		if item.removeTags == "Y":
 			result[key] = strip_html_tags(raw_value)
 		else:
 			result[key] = normalize_text(raw_value)
@@ -1015,7 +1022,7 @@ async def download_attachment_file(
 	req_id: str,
 	ssl_mode: str,
 ) -> tuple[str, str]:
-	save_root = "./downloads"
+	save_root = "./attachment"
 	os.makedirs(save_root, exist_ok=True)
 
 	final_name = normalize_text(file_name)
@@ -1060,22 +1067,7 @@ async def run_minutes_all_and_callback(request: RegexCrawlRequest) -> None:
 		await post_minutes_callback(payload)
 	except Exception as exc:
 		traceback.print_exc()
-
-		error_message = f"{type(exc).__name__}: {str(exc)}\n{traceback.format_exc()}"
-
-		error_payload = {
-			"type": request.type,
-			"req_id": request.req_id,
-			"crw_id": request.crw_id or generate_crw_id(),
-			"ok": "false",
-			"message": error_message,
-			"data": [],
-		}
-
-		try:
-			await post_minutes_callback(error_payload)
-		except Exception:
-			traceback.print_exc()
+		raise
 
 
 # =========================

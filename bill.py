@@ -409,8 +409,8 @@ class UniversalCrawler:
                     final_name = raw if re.search(r'\.[a-zA-Z0-9]{2,4}$', raw) else f"{raw}{ext}"
                     final_name = re.sub(r'[\\/*?:"<>|]', "", final_name) # 파일명 정규화
                     
-                    #save_path = os.path.join(FILE_DOWNLOAD_DIR, final_name) # 테스트용으로 로컬 저장
-                    #await download.save_as(save_path) # 테스트용으로 로컬 저장
+                    save_path = os.path.join(FILE_DOWNLOAD_DIR, final_name) # 테스트용으로 로컬 저장
+                    await download.save_as(save_path) # 테스트용으로 로컬 저장
                     
                     print(f"[+] 다운로드 완료: {final_name}", flush=True)
                     raw = final_name
@@ -568,11 +568,11 @@ async def execute_view_scraping(req: ScrapeRequest):
                     base = f"{parsed.scheme}://{parsed.netloc}"
                     
                     detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base)
-                    view_data.append({"view_id": vid, "view_url": target_url, **detail})
+                    view_data.append({"view_id": vid, "URL": target_url, **detail})
                     
                 except Exception as e:
                     print(f"    [!] ID: {vid} 수집 실패: {e}", flush=True)
-                    view_data.append({"view_id": vid, "view_url": target_url, "view_error": str(e)})
+                    view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
 
             # --- 루프 종료 후 공통 처리 (정상 종료 또는 중단 시 모두 실행) ---
             if view_data:
@@ -609,8 +609,7 @@ async def execute_view_scraping(req: ScrapeRequest):
             await browser.close()
 
 async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, data_list: list):
-    #target_url = "http://211.219.26.15:18123/insert_api.do"
-    target_url = "http://172.17.0.19:8080/insert_api.do"
+    target_url = "http://10.201.38.157:8080/insert_api.do"
     
     payload = {
         "reqId": req_id,
@@ -621,20 +620,22 @@ async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, data_list:
 
     print(f"\n[*] [3단계] 데이터 전송 시도 (JSON 방식)", flush=True)
     
+    # 즉시 응답 후 백그라운드에서 전송
+    asyncio.create_task(_do_send(target_url, payload))
+    print(f"[OK] {target_url} -> 전송 접수완료 (백그라운드 처리 중)", flush=True)
+    return True
+
+async def _do_send(target_url: str, payload: dict):
     async with httpx.AsyncClient() as client:
         try:
-            # json=payload 를 사용하면 자동으로 JSON Body 전송 및 헤더가 설정됩니다.
-            response = await client.post(target_url, json=payload, timeout=60.0)
+            response = await client.post(target_url, json=payload, timeout=120.0)
             
             if response.status_code == 200:
                 print(f"[OK] API 전송 성공", flush=True)
-                return True
             else:
-                print(f"[!] {target_url} 전송 완료 ", flush=True)
-                return False
+                print(f"[!] {target_url} 전송 완료", flush=True)
         except Exception as e:
             print(f"[!] 네트워크 오류: {str(e)}", flush=True)
-            return False
         
 async def handle_scraping_request(req: ScrapeRequest, background_tasks: BackgroundTasks):
     try:

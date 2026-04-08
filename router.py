@@ -1,15 +1,35 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from pydantic import ValidationError, BaseModel
 from bill import app as bill_app
 from minutes import app as minutes_app
-from bill import execute_view_scraping  # 의안 실행 함수
-from minutes import run_minutes_all_and_callback  # 회의록 실행 함수
+from minutes import CrawlRequest, run_minutes_all_and_callback, parse_crawl_request
+from bill import ScrapeRequest, execute_view_scraping
+from crawl_status import create_job, get_job, set_job_running, set_job_done, set_job_failed
 
 router = APIRouter()
 
+class CrawlStatusRequest(BaseModel):
+    req_id: str
+
 router.include_router(bill_app.router, tags=["Bill"])
 router.include_router(minutes_app.router, tags=["Minutes"])
+
+async def run_bill_job(req_obj):
+    try:
+        await set_job_running(req_obj.req_id)
+        await execute_view_scraping(req_obj)
+        await set_job_done(req_obj.req_id)
+    except Exception:
+        await set_job_failed(req_obj.req_id)
+
+async def run_minutes_job(req_obj):
+    try:
+        await set_job_running(req_obj.req_id)
+        await run_minutes_all_and_callback(req_obj)
+        await set_job_done(req_obj.req_id)
+    except Exception:
+        await set_job_failed(req_obj.req_id)
 
 @router.post("/crawl")
 async def integrated_crawl_api(request: Request, background_tasks: BackgroundTasks):
@@ -28,14 +48,15 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
     try:
         # 3. 타입에 따른 모델 검증 분기
         if req_type == "bill":
-            from bill import ScrapeRequest, execute_view_scraping
             req_obj = ScrapeRequest(**json_data)  # 여기서 Pydantic 검증 발생
-            background_tasks.add_task(execute_view_scraping, req_obj)
+            await create_job(req_obj.req_id)
+            background_tasks.add_task(run_bill_job, req_obj)
             
         elif req_type == "minutes":
-            from minutes import RegexCrawlRequest, run_minutes_all_and_callback
-            req_obj = RegexCrawlRequest(**json_data)
-            background_tasks.add_task(run_minutes_all_and_callback, req_obj)
+            raw = CrawlRequest(**json_data)
+            req_obj = parse_crawl_request(raw)
+            await create_job(req_obj.req_id)
+            background_tasks.add_task(run_minutes_job, req_obj)
             
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type입니다: {req_type}"})
@@ -67,4 +88,22 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
         "crw_id": json_data.get("crw_id"),
         "ok": True,
         "message": f"[{req_type}] 수집 작업을 시작했습니다."
+    }
+
+@router.get("/crawl/status")
+async def integrated_crawl_status_api(body: CrawlStatusRequest):
+    job = await get_job(body.req_id)
+
+    if not job:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "req_id": body.req_id,
+                "status": "NOT_FOUND"
+            }
+        )
+
+    return {
+        "req_id": job["req_id"],
+        "status": job["status"]
     }
