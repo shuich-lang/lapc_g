@@ -38,10 +38,10 @@ USER_AGENT = (
 	"Chrome/122.0.0.0 Safari/537.36"
 )
 
-# CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"	
-# CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"		# 도커 내에서 cms 컨테이너 접근용
-# CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"			# python 내 json 저장
-CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
+CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"		# 실제 CMS 서버 (도커 외부에서 접근용)
+# CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
+# CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
+# CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
 
@@ -402,7 +402,9 @@ def build_minutes_callback_payload(
 
 	for item in crawl_response.items:
 		if item.fields:
-			data.append(item.fields)
+			row = dict(item.fields)
+			row["url"] = item.detail_url
+			data.append(row)
 
 	return {
 		"req_id": request.req_id,
@@ -1020,7 +1022,7 @@ async def download_attachment_file(
 	req_id: str,
 	ssl_mode: str,
 ) -> tuple[str, str]:
-	save_root = "./downloads"
+	save_root = "./attachment"
 	os.makedirs(save_root, exist_ok=True)
 
 	final_name = normalize_text(file_name)
