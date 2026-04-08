@@ -1067,22 +1067,7 @@ async def run_minutes_all_and_callback(request: RegexCrawlRequest) -> None:
 		await post_minutes_callback(payload)
 	except Exception as exc:
 		traceback.print_exc()
-
-		error_message = f"{type(exc).__name__}: {str(exc)}\n{traceback.format_exc()}"
-
-		error_payload = {
-			"type": request.type,
-			"req_id": request.req_id,
-			"crw_id": request.crw_id or generate_crw_id(),
-			"ok": "false",
-			"message": error_message,
-			"data": [],
-		}
-
-		try:
-			await post_minutes_callback(error_payload)
-		except Exception:
-			traceback.print_exc()
+		raise
 
 
 # =========================
