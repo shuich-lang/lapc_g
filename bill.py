@@ -651,6 +651,78 @@ async def handle_scraping_request(req: ScrapeRequest, background_tasks: Backgrou
         }
     except Exception as e:
         return error_response(f"요청 처리 중 오류 발생: {str(e)}")
+
+# 2026.04.09 - 이성진 코드 추가
+# test용으로 1건만 수집하는 함수
+async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
+    """테스트용: 1건만 수집하여 insert_api.do 동일 형식 payload 반환"""
+    p = req.param
+    view_data = []
+
+    async with async_playwright() as playwright:
+        browser, page = await _setup_browser(playwright)
+        try:
+            # 1단계: 리스트 1페이지만 수집
+            print(f"[TEST] 리스트 수집: {p.list_url}", flush=True)
+            await page.goto(p.list_url, wait_until="domcontentloaded", timeout=30000)
+
+            if p.rasmbly_numpr and p.rasmbly_numpr.strip():
+                await UniversalCrawler.apply_filter_and_search(
+                    page, p.rasmbly_numpr.strip(), p.list_class,
+                    p.search_form_selector, p.numpr_select_selector, p.search_btn_selector,
+                )
+            else:
+                await page.wait_for_selector(normalize_selector(p.list_class), timeout=10000)
+
+            list_data = await UniversalCrawler.extract_list_page(page, p.list_class, p.view_id_param)
+
+            if not list_data:
+                return {
+                    "req_id": req.req_id,
+                    "type": req.type,
+                    "crw_id": req.crw_id,
+                    "data": [],
+                }
+
+            # 2단계: 첫 1건만 상세 수집
+            item = list_data[0]
+            vid = item.get("view_id")
+
+            if vid:
+                href = item.get("link_href", "")
+                is_real = href and not href.startswith(("#", "javascript"))
+                target_url = urljoin(p.list_url, href) if is_real else f"{p.view_url}{'&' if '?' in p.view_url else '?'}{p.view_id_param}={vid}"
+
+                print(f"[TEST] 상세 수집: {vid}", flush=True)
+
+                try:
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+                    parsed_url = urlparse(target_url)
+                    base = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                    detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base)
+                    view_data.append({"view_id": vid, "view_url": target_url, **detail})
+                except Exception as e:
+                    print(f"[TEST] 상세 수집 실패: {e}", flush=True)
+                    view_data.append({"view_id": vid, "view_url": target_url, "view_error": str(e)})
+
+            return {
+                "req_id": req.req_id,
+                "type": req.type,
+                "crw_id": req.crw_id,
+                "data": view_data,
+            }
+
+        except Exception as e:
+            print(f"[TEST] 에러: {e}", flush=True)
+            return {
+                "req_id": req.req_id,
+                "type": req.type,
+                "crw_id": req.crw_id,
+                "data": [],
+            }
+        finally:
+            await browser.close()
+
     
 # 공통 테스트 처리 로직
 async def handle_test_request(req: ScrapeRequest):
@@ -683,10 +755,10 @@ async def api_stop():
     print("[!] 외부 중단 요청 수신", flush=True)
     return {"ok": True, "message": "Stop requested. Current process will halt and save progress."} 
 
-@app.get("/crawl/test")
-async def api_get_test(req: ScrapeRequest = Depends()):
-    return await handle_test_request(req)
+# @app.get("/crawl/test")
+# async def api_get_test(req: ScrapeRequest = Depends()):
+#     return await handle_test_request(req)
 
-@app.post("/crawl/test")
-async def api_post_test(req: ScrapeRequest):
-    return await handle_test_request(req)
+# @app.post("/crawl/test")
+# async def api_post_test(req: ScrapeRequest):
+#     return await handle_test_request(req)
