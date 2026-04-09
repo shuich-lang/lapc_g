@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError, BaseModel
+import json
 
 from bill import (
     app as bill_app,
@@ -16,6 +17,14 @@ from minutes import (
     crawl_minutes_regex_check,
     build_minutes_callback_payload,
 )
+from five_mins_free_spch import (
+    app as free5min_app,
+    SpchCrawlRequest,
+    crawl_spch_regex_check,
+    build_spch_callback_payload,
+    run_spch_all_and_callback,
+)
+
 from crawl_status import create_job, get_job, set_job_running, set_job_done, set_job_failed
 
 
@@ -24,6 +33,8 @@ router = APIRouter()
 
 class CrawlStatusRequest(BaseModel):
     req_id: str
+
+# ======= Background Task Runners =======
 
 async def run_bill_job(req_obj):
     try:
@@ -37,6 +48,14 @@ async def run_minutes_job(req_obj):
     try:
         await set_job_running(req_obj.req_id)
         await run_minutes_all_and_callback(req_obj)
+        await set_job_done(req_obj.req_id)
+    except Exception:
+        await set_job_failed(req_obj.req_id)
+
+async def run_spch_job(req_obj):
+    try:
+        await set_job_running(req_obj.req_id)
+        await run_spch_all_and_callback(req_obj)
         await set_job_done(req_obj.req_id)
     except Exception:
         await set_job_failed(req_obj.req_id)
@@ -60,6 +79,10 @@ def handle_validation_error(e: ValidationError):
             "detail": errors, # 상세 로그 포함
         }
     )
+
+@router.get("/health")
+async def health():
+	return {"status": "ok"}
 
 @router.post("/crawl")
 async def integrated_crawl_api(request: Request, background_tasks: BackgroundTasks):
@@ -87,6 +110,11 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             req_obj = parse_crawl_request(raw)
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_minutes_job, req_obj)
+        
+        elif req_type == "free5min":
+            req_obj = SpchCrawlRequest(**json_data)
+            await create_job(req_obj.req_id)
+            background_tasks.add_task(run_spch_job, req_obj)
             
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type입니다: {req_type}"})
@@ -125,6 +153,11 @@ async def integrated_crawl_test_api(request: Request):
             req_obj = parse_crawl_request(raw)
             crawl_response = await crawl_minutes_regex_check(req_obj, crawl_all=False)
             return build_minutes_callback_payload(req_obj, crawl_response)
+        
+        elif req_type == "free5min":
+            req_obj = SpchCrawlRequest(**json_data)
+            crawl_response = await crawl_spch_regex_check(req_obj, crawl_all=False)
+            return build_spch_callback_payload(req_obj, crawl_response)
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type입니다: {req_type}"})
@@ -150,3 +183,14 @@ async def integrated_crawl_status_api(body: CrawlStatusRequest):
         "req_id": job["req_id"],
         "status": job["status"]
     }
+
+
+@router.post("/insert_api")
+async def insert_api(payload: dict):
+	print("===== insert_api callback received =====")
+	print(f"callback data size: {len(payload.get('data', []))}")
+
+	with open("result.json", "w", encoding="utf-8") as f:
+		json.dump(payload, f, ensure_ascii=False, indent=2)
+	
+	return {"result": "ok"}
