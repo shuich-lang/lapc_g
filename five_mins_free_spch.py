@@ -23,12 +23,13 @@ from pydantic import BaseModel, Field, HttpUrl
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 import traceback
+import json
 
 
 if sys.platform.startswith("win"):
 	asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
- 
-app = FastAPI(title="Minutes Crawl API", version="0.8.0")
+
+app = FastAPI(title="5min Free Speech Crawl API", version="0.1.0")
 
 
 USER_AGENT = (
@@ -43,47 +44,36 @@ USER_AGENT = (
 # CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
 CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"			# 운영 cms
 
-FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
-
-
 # =========================
 # Request / Response Model
 # =========================
 
-class MinutesParam(BaseModel):
+class SpchParam(BaseModel):
 	list_url: HttpUrl = Field(...)
 	list_root_selector: str = Field(...)
 	item_selector: str = Field(...)
 	target_selector: str = Field(...)
 	ssl_mode: str = Field("Y")
 	max_pages: int = Field(500)
-	skip_top_count: int = Field(0, description="목록 상단에서 크롤링을 건너뛸 아이템 수. 기본값 0")
+	skip_top_count: int = Field(0)
 
 
 class RegexItem(BaseModel):
 	col: str = Field(..., description="응답 key 이름")
 	regex: list[str] = Field(..., description="상세 HTML에서 추출할 정규식")
-	xpath: list[str] = Field(None, description="(미구현) XPath 추출용 필드 - 향후 지원 예정")
+	xpath: list[str] = Field(None, description="(미구현) XPath 추출용 필드")
 	removeTags: str = Field(..., description="HTML 태그 제거 여부: Y | N")
 
 
-class CrawlRequest(BaseModel):
-	req_id: str = Field(..., description="날짜 포맷: yyyyMMddHHmmssSSSSSS")
-	crw_id: Optional[str] = Field(None, description="수집 설정 구분값")
-	type: str = Field(..., description="수집 유형: minutes, bill 등")
-	param: dict = Field(..., description="type별 크롤링 파라미터")
-	item: list[RegexItem] = Field(default_factory=list, description="동적으로 추출할 항목 목록")
-
-
-class RegexCrawlRequest(BaseModel):
+class SpchCrawlRequest(BaseModel):
 	req_id: str = Field(...)
 	crw_id: Optional[str] = Field(None)
 	type: str = Field(...)
-	param: MinutesParam = Field(...)
+	param: SpchParam = Field(...)
 	item: list[RegexItem] = Field(default_factory=list)
 
 
-class MinutesItem(BaseModel):
+class SpchItem(BaseModel):
 	rank: int
 	list_title: str
 
@@ -101,34 +91,24 @@ class MinutesItem(BaseModel):
 	note: Optional[str] = None
 
 
-class CrawlResponse(BaseModel):
+class SpchCrawlResponse(BaseModel):
 	list_url: str
 	item_count: int
-	items: list[MinutesItem]
-
-
-class CrawlStartResponse(BaseModel):
-	type: str
-	req_id: str
-	crw_id: str
-	ok: str
-	message: str
+	items: list[SpchItem]
 
 
 # =========================
-# Utility
+# Utility (minutes.py와 동일)
 # =========================
 
 def normalize_text(text: Optional[str]) -> str:
 	if not text:
 		return ""
-
 	cleaned = (
 		text.replace("&nbsp;", " ")
 			.replace("&#160;", " ")
 			.replace("\xa0", " ")
 	)
-
 	return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -144,22 +124,6 @@ def safe_select(element, selector: str):
 		return element.select(selector)
 	except Exception:
 		return []
-
-
-def unique_keep_order(values: list[str]) -> list[str]:
-	seen = set()
-	result: list[str] = []
-
-	for value in values:
-		normalized = normalize_text(value)
-		if not normalized:
-			continue
-		if normalized in seen:
-			continue
-		seen.add(normalized)
-		result.append(normalized)
-
-	return result
 
 
 def get_verify_options(ssl_mode: str):
@@ -206,7 +170,6 @@ async def fetch_html_by_method(
 			response = await client.post(url, data=form_data or {})
 		else:
 			response = await client.get(url)
-
 		response.raise_for_status()
 		return response.text
 
@@ -220,7 +183,6 @@ def is_javascript_href(href: Optional[str]) -> bool:
 def is_http_like_href(href: Optional[str]) -> bool:
 	if not href:
 		return False
-
 	lowered = href.strip().lower()
 	return (
 		lowered.startswith("http://")
@@ -234,90 +196,48 @@ def is_http_like_href(href: Optional[str]) -> bool:
 def is_meaningful_detail_url(detail_url: Optional[str], list_url: str) -> bool:
 	if not detail_url:
 		return False
-
 	normalized_detail = detail_url.strip()
 	normalized_list = list_url.strip()
-
 	if not normalized_detail:
 		return False
-
 	if normalized_detail.lower().startswith("javascript:"):
 		return False
-
 	if normalized_detail == normalized_list:
 		return False
-
 	return True
-
-
-def extract_filename_from_url(url: str) -> Optional[str]:
-	try:
-		path = urlparse(url).path
-		if not path:
-			return None
-		name = path.split("/")[-1]
-		return normalize_text(name) or None
-	except Exception:
-		return None
-
-
-def clean_title_candidate(text: str) -> str:
-	value = normalize_text(text)
-	value = re.sub(r"\b(회의록|회\s*의\s*록|회의록보기|원문보기)\b", "", value)
-	value = normalize_text(value)
-	return value
-
-
-def find_first_regex(text: str, patterns: list[str]) -> Optional[str]:
-	for pattern in patterns:
-		match = re.search(pattern, text, re.IGNORECASE)
-		if match:
-			if match.groups():
-				return normalize_text(match.group(1))
-			return normalize_text(match.group(0))
-	return None
 
 
 def apply_regex_raw(source: str, pattern: Optional[str]) -> Optional[str]:
 	if not pattern:
 		return None
-
 	try:
 		match = re.search(pattern, source, re.IGNORECASE | re.DOTALL)
 	except re.error as exc:
 		raise ValueError(f"잘못된 정규식입니다: {pattern} / {str(exc)}") from exc
-
 	if not match:
 		return None
-
 	if match.groups():
 		return match.group(1)
-
 	return match.group(0)
 
 
 def strip_html_tags(value: Optional[str]) -> Optional[str]:
 	if not value:
 		return None
-
 	soup = BeautifulSoup(value, "lxml")
 	text = soup.get_text("\n", strip=True)
-
 	lines = [normalize_text(line) for line in text.splitlines()]
 	lines = [line for line in lines if line]
-
 	return "".join(lines) if lines else None
 
 
 def extract_uid(detail_url: Optional[str]) -> Optional[str]:
 	if not detail_url:
 		return None
-
 	try:
 		parsed = urlparse(detail_url)
-
 		query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-		preferred_keys = ["uid", "key", "MINTS_SN", "minutesSn", "minutes_sn", "id", "no", "seq"]
+		preferred_keys = ["uid", "key", "id", "no", "seq", "idx"]
 
 		for preferred_key in preferred_keys:
 			for key, value in query_pairs:
@@ -341,46 +261,27 @@ def extract_uid(detail_url: Optional[str]) -> Optional[str]:
 				return match.group(1)
 
 		return None
-
 	except Exception:
 		return None
-
-
-def extract_rasmbly_numpr_from_list_row(row_text: str) -> Optional[str]:
-	return find_first_regex(
-		row_text,
-		[
-			r"(제\s*\d+\s*대)",
-			r"(\d+\s*대)",
-		],
-	)
 
 
 def replace_query_param(url: str, param_name: str, param_value: str) -> str:
 	parsed = urlparse(url)
 	query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-
 	new_pairs = []
 	replaced = False
-
 	for key, value in query_pairs:
 		if key == param_name:
 			new_pairs.append((key, param_value))
 			replaced = True
 		else:
 			new_pairs.append((key, value))
-
 	if not replaced:
 		new_pairs.append((param_name, param_value))
-
 	new_query = urlencode(new_pairs)
 	return urlunparse((
-		parsed.scheme,
-		parsed.netloc,
-		parsed.path,
-		parsed.params,
-		new_query,
-		parsed.fragment,
+		parsed.scheme, parsed.netloc, parsed.path,
+		parsed.params, new_query, parsed.fragment,
 	))
 
 
@@ -392,55 +293,6 @@ def to_model_dict(model) -> dict:
 
 def generate_crw_id() -> str:
 	return f"CRW_{uuid4().hex}"
-
-
-def build_minutes_callback_payload(
-	request: RegexCrawlRequest,
-	crawl_response: CrawlResponse,
-) -> dict:
-	data = []
-
-	for item in crawl_response.items:
-		if item.fields:
-			row = dict(item.fields)
-			row["url"] = item.detail_url
-			data.append(row)
-
-	return {
-		"req_id": request.req_id,
-		"type": request.type,
-		"crw_id": request.crw_id,
-		"data": data,
-	}
-
-
-async def post_minutes_callback(payload: dict) -> None:
-	timeout = httpx.Timeout(60.0, connect=10.0)
-
-	async with httpx.AsyncClient(timeout=timeout) as client:
-		response = await client.post(
-			CALLBACK_INSERT_API_URL,
-			json=payload,
-			headers={"Content-Type": "application/json"},
-		)
-		response.raise_for_status()
-
-
-def parse_crawl_request(raw: CrawlRequest):
-	if raw.type == "minutes":
-		return RegexCrawlRequest(
-			req_id=raw.req_id,
-			crw_id=raw.crw_id,
-			type=raw.type,
-			param=MinutesParam(**raw.param),
-			item=raw.item,
-		)
-
-	# 나중에 다른 type 추가 시 여기서 분기
-	# if raw.type == "bill":
-	#     return BillCrawlRequest(...)
-
-	raise HTTPException(status_code=400, detail=f"지원하지 않는 type입니다: {raw.type}")
 
 
 # =========================
@@ -482,7 +334,6 @@ def extract_list_candidates(
 
 		if not title:
 			title = row_text
-
 		if not title:
 			continue
 
@@ -491,12 +342,10 @@ def extract_list_candidates(
 			"href": href or None,
 			"onclick": onclick or None,
 			"row_text": row_text,
-			"rasmbly_numpr": extract_rasmbly_numpr_from_list_row(row_text),
 		})
 
 	if limit is None:
 		return results
-
 	return results[:limit]
 
 
@@ -504,9 +353,9 @@ def extract_list_candidates(
 # Dynamic regex detail parsing
 # =========================
 
-def parse_minutes_detail_by_dynamic_regex(
+def parse_spch_detail_by_dynamic_regex(
 	detail_html: str,
-	request: RegexCrawlRequest,
+	request: SpchCrawlRequest,
 	list_title: Optional[str] = None,
 ) -> dict[str, Optional[str]]:
 	result: dict[str, Optional[str]] = {}
@@ -516,13 +365,11 @@ def parse_minutes_detail_by_dynamic_regex(
 		if not key:
 			continue
 
-		# regex 목록 중 "list_title" 예약어 체크
 		if len(item.regex) == 1 and normalize_text(item.regex[0]).lower() == "list_title":
 			value = normalize_text(list_title)
 			result[key] = value or None
 			continue
 
-		# 정규식 목록을 순서대로 시도, 첫 매칭 결과 사용
 		raw_value = None
 		for pattern in item.regex:
 			raw_value = apply_regex_raw(detail_html, pattern)
@@ -544,7 +391,6 @@ def parse_minutes_detail_by_dynamic_regex(
 def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], list[int]]:
 	soup = BeautifulSoup(html, "lxml")
 	page_numbers = {1}
-
 	candidate_param_names = ["page", "pageNo", "pageNum", "pageIndex", "currentPage"]
 	param_counter: dict[str, int] = {}
 
@@ -552,11 +398,9 @@ def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], l
 		href = normalize_text(a.get("href"))
 		if not href or href.lower().startswith("javascript:"):
 			continue
-
 		absolute_url = urljoin(list_url, href)
 		parsed = urlparse(absolute_url)
 		query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-
 		for key, value in query_pairs:
 			if key in candidate_param_names and value.isdigit():
 				page_numbers.add(int(value))
@@ -571,7 +415,6 @@ def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], l
 		if count > best_count:
 			best_param_name = key
 			best_count = count
-
 	return best_param_name, sorted(page_numbers)
 
 
@@ -617,37 +460,8 @@ def extract_form_request_info(html: str, list_url: str) -> tuple[Optional[str], 
 	return action_url, form_data, page_field_name, sorted(page_numbers)
 
 
-def extract_file_info_from_reserved_value(
-	raw_file_value: str,
-	base_url: str,
-) -> tuple[str, Optional[str]]:
-	raw_value = normalize_text(raw_file_value)
-
-	if not raw_value:
-		raise ValueError("__file_url__ 값이 비어 있습니다.")
-
-	# <a ...>...</a> 전체가 넘어온 경우
-	if "<a" in raw_value.lower():
-		soup = BeautifulSoup(raw_value, "lxml")
-		a_tag = soup.find("a")
-
-		if not a_tag:
-			raise ValueError("__file_url__에서 a 태그를 찾지 못했습니다.")
-
-		href = normalize_text(a_tag.get("href"))
-		file_name = normalize_text(a_tag.get_text(" ", strip=True))
-
-		if not href:
-			raise ValueError("__file_url__ a 태그에 href가 없습니다.")
-
-		return urljoin(base_url, href), (file_name or None)
-
-	# 그냥 URL만 넘어온 경우
-	return urljoin(base_url, raw_value), None
-
-
 async def build_list_pages(
-	request: RegexCrawlRequest,
+	request: SpchCrawlRequest,
 	crawl_all: bool,
 ) -> list[tuple[str, str]]:
 	list_url = str(request.param.list_url)
@@ -663,14 +477,13 @@ async def build_list_pages(
 	action_url, form_data, page_field_name, _ = extract_form_request_info(first_html, list_url)
 
 	def has_list_items(html: str) -> bool:
-		candidates = extract_list_candidates(
+		return len(extract_list_candidates(
 			html=html,
 			list_root_selector=request.param.list_root_selector,
 			item_selector=request.param.item_selector,
 			target_selector=request.param.target_selector,
 			limit=1,
-		)
-		return len(candidates) > 0
+		)) > 0
 
 	def make_page_signature(html: str) -> str:
 		candidates = extract_list_candidates(
@@ -680,14 +493,10 @@ async def build_list_pages(
 			target_selector=request.param.target_selector,
 			limit=None,
 		)
-
-		signature_parts = []
-		for candidate in candidates[:10]:
-			signature_parts.append(
-				f"{candidate.get('title', '')}|{candidate.get('href', '')}|{candidate.get('onclick', '')}"
-			)
-
-		return "||".join(signature_parts)
+		return "||".join(
+			f"{c.get('title', '')}|{c.get('href', '')}|{c.get('onclick', '')}"
+			for c in candidates[:10]
+		)
 
 	current_page_no = 1
 	current_url = list_url
@@ -696,24 +505,20 @@ async def build_list_pages(
 	while current_page_no <= request.param.max_pages:
 		if not has_list_items(current_html):
 			break
-
 		signature = make_page_signature(current_html)
 		if signature in seen_page_signatures:
 			break
 		seen_page_signatures.add(signature)
-
 		pages.append((current_url, current_html))
 
 		next_page_no = current_page_no + 1
 
 		if link_param_name:
 			next_url = replace_query_param(list_url, link_param_name, str(next_page_no))
-
 			try:
 				next_html = await fetch_html(next_url, request.param.ssl_mode)
 			except Exception:
 				break
-
 			current_page_no = next_page_no
 			current_url = next_url
 			current_html = next_html
@@ -722,7 +527,6 @@ async def build_list_pages(
 		if action_url and page_field_name:
 			next_form_data = dict(form_data)
 			next_form_data[page_field_name] = str(next_page_no)
-
 			try:
 				next_html = await fetch_html_by_method(
 					url=action_url,
@@ -732,7 +536,6 @@ async def build_list_pages(
 				)
 			except Exception:
 				break
-
 			current_page_no = next_page_no
 			current_url = action_url
 			current_html = next_html
@@ -761,11 +564,9 @@ async def try_extract_url_from_raw(
 	for raw in raw_candidates:
 		if not raw:
 			continue
-
 		match = re.search(r"""['"](https?://[^'"]+)['"]""", raw)
 		if match:
 			return match.group(1), "string-resolve"
-
 		match = re.search(r"""['"]((?:/|\.\./|\./)[^'"]+)['"]""", raw)
 		if match:
 			return urljoin(list_url, match.group(1)), "string-resolve"
@@ -789,26 +590,24 @@ async def resolve_detail_by_playwright(
 				ignore_https_errors=(ssl_mode == "N"),
 			)
 			page = await context.new_page()
-
 			await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
 
 			root = page.locator(list_root_selector).first
 			if await root.count() == 0:
 				await browser.close()
-				return None, "playwright-no-root", None, None, "list_root_selector에 해당하는 영역을 찾지 못했습니다."
+				return None, "playwright-no-root", None, None, "list_root_selector를 찾지 못했습니다."
 
 			items = root.locator(item_selector)
 			item_count = await items.count()
 			if item_count == 0:
 				await browser.close()
-				return None, "playwright-no-item", None, None, "item_selector에 해당하는 item을 찾지 못했습니다."
+				return None, "playwright-no-item", None, None, "item_selector를 찾지 못했습니다."
 
 			if rank_index >= item_count:
 				await browser.close()
-				return None, "playwright-item-out-of-range", None, None, "item index 범위를 벗어났습니다."
+				return None, "playwright-item-out-of-range", None, None, "item index 범위 초과."
 
 			item = items.nth(rank_index)
-
 			if target_selector == "self":
 				target = item
 			else:
@@ -816,39 +615,28 @@ async def resolve_detail_by_playwright(
 
 			if await target.count() == 0:
 				await browser.close()
-				return None, "playwright-no-target", None, None, "target_selector에 해당하는 target을 찾지 못했습니다."
+				return None, "playwright-no-target", None, None, "target_selector를 찾지 못했습니다."
 
 			original_url = page.url
 
+			# popup 시도
 			try:
 				async with page.expect_popup(timeout=5000) as popup_info:
 					await target.click()
-
 				popup = await popup_info.value
-
 				try:
 					await popup.wait_for_load_state("networkidle", timeout=10000)
 				except PlaywrightTimeoutError:
 					pass
-
-				detail_html = None
-				for _ in range(3):
-					try:
-						detail_html = await popup.content()
-						break
-					except Exception:
-						await asyncio.sleep(0.5)
-
 				detail_url = popup.url
 				detail_html = await popup.content()
-
 				await popup.close()
 				await browser.close()
 				return detail_url, "playwright-click", "popup", detail_html, None
-
 			except PlaywrightTimeoutError:
 				pass
 
+			# same page 이동
 			try:
 				await page.wait_for_load_state("networkidle", timeout=5000)
 			except PlaywrightTimeoutError:
@@ -860,6 +648,7 @@ async def resolve_detail_by_playwright(
 				await browser.close()
 				return detail_url, "playwright-click", "same_page", detail_html, None
 
+			# iframe
 			frames = page.frames
 			if len(frames) > 1:
 				for frame in frames[1:]:
@@ -867,18 +656,17 @@ async def resolve_detail_by_playwright(
 						frame_html = await frame.content()
 					except Exception:
 						continue
-
 					if frame_html and len(frame_html) > 200:
 						detail_url = frame.url or page.url
 						await browser.close()
 						return detail_url, "playwright-click", "iframe", frame_html, None
 
 			await browser.close()
-			return None, "playwright-click", "unknown", None, "클릭은 수행했지만 popup/same-page/iframe 변화를 확인하지 못했습니다."
+			return None, "playwright-click", "unknown", None, "클릭 후 변화를 감지하지 못했습니다."
 
 	except Exception as exc:
 		return None, f"playwright-error:{type(exc).__name__}", None, None, (
-			f"Playwright 예외 발생: {type(exc).__name__} / {str(exc)}\n{traceback.format_exc()}"
+			f"Playwright 예외: {type(exc).__name__} / {str(exc)}\n{traceback.format_exc()}"
 		)
 
 
@@ -901,9 +689,9 @@ async def open_detail_page(
 			except Exception as exc:
 				fallback_note = f"직접 접근 실패 후 Playwright fallback: {type(exc).__name__}"
 		else:
-			fallback_note = "href가 목록 URL과 동일하거나 유효하지 않아 Playwright fallback"
+			fallback_note = "href가 유효하지 않아 Playwright fallback"
 	else:
-		fallback_note = "javascript/onclick 기반 상세 진입 또는 href 없음"
+		fallback_note = "javascript/onclick 기반 또는 href 없음"
 
 	resolved_url, resolved_method = await try_extract_url_from_raw(list_url, href, onclick)
 	if resolved_url and is_meaningful_detail_url(resolved_url, list_url):
@@ -924,7 +712,6 @@ async def open_detail_page(
 
 	merged_note_parts = [part for part in [fallback_note, note] if part]
 	merged_note = " / ".join(merged_note_parts) if merged_note_parts else None
-
 	return detail_url, method, open_type, detail_html, merged_note
 
 
@@ -932,13 +719,13 @@ async def open_detail_page(
 # Shared builders
 # =========================
 
-async def build_minutes_item_by_dynamic_regex(
-	request: RegexCrawlRequest,
+async def build_spch_item_by_dynamic_regex(
+	request: SpchCrawlRequest,
 	list_page_url: str,
 	candidate: dict,
 	rank_index_in_page: int,
 	final_rank: int,
-) -> MinutesItem:
+) -> SpchItem:
 	title = candidate["title"]
 	href = candidate["href"]
 	onclick = candidate["onclick"]
@@ -957,7 +744,7 @@ async def build_minutes_item_by_dynamic_regex(
 	uid = extract_uid(detail_url)
 
 	if not detail_html:
-		return MinutesItem(
+		return SpchItem(
 			rank=final_rank,
 			list_title=title,
 			detail_url=detail_url,
@@ -971,37 +758,13 @@ async def build_minutes_item_by_dynamic_regex(
 			note=note or "상세 view 접근 실패",
 		)
 
-	parsed = parse_minutes_detail_by_dynamic_regex(
+	parsed = parse_spch_detail_by_dynamic_regex(
 		detail_html=detail_html,
 		request=request,
 		list_title=title,
 	)
 
-	file_value = parsed.pop("__file_url__", None)
-
-	if file_value:
-		try:
-			full_file_url, extracted_file_name = extract_file_info_from_reserved_value(
-				raw_file_value=file_value,
-				base_url=detail_url or list_page_url,
-			)
-
-			saved_path, saved_name = await download_attachment_file(
-				file_url=full_file_url,
-				file_name=extracted_file_name,
-				req_id=request.req_id,
-				ssl_mode=request.param.ssl_mode,
-			)
-
-			parsed["file_path"] = saved_path
-			parsed["file_name"] = saved_name
-
-		except Exception as exc:
-			parsed["file_path"] = None
-			parsed["file_name"] = None
-			note = f"{note} / 첨부파일 다운로드 실패: {type(exc).__name__}" if note else f"첨부파일 다운로드 실패: {type(exc).__name__}"
-
-	return MinutesItem(
+	return SpchItem(
 		rank=final_rank,
 		list_title=title,
 		detail_url=detail_url,
@@ -1016,68 +779,59 @@ async def build_minutes_item_by_dynamic_regex(
 	)
 
 
-async def download_attachment_file(
-	file_url: str,
-	file_name: Optional[str],
-	req_id: str,
-	ssl_mode: str,
-) -> tuple[str, str]:
-	save_root = "./attachment"
-	os.makedirs(save_root, exist_ok=True)
+# =========================
+# Callback
+# =========================
 
-	final_name = normalize_text(file_name)
+def build_spch_callback_payload(
+	request: SpchCrawlRequest,
+	crawl_response: SpchCrawlResponse,
+) -> dict:
+	data = []
+	
+	for item in crawl_response.items:
+		if item.fields:
+			row = dict(item.fields)
+			row["url"] = item.detail_url
+			data.append(row)
 
-	if not final_name:
-		path_name = urlparse(file_url).path.split("/")[-1]
-		final_name = unquote(path_name) if path_name else ""
+	return {
+		"req_id": request.req_id,
+		"type": request.type,
+		"crw_id": request.crw_id,
+		"data": data,
+	}
 
-	if not final_name:
-		final_name = f"{req_id}.bin"
 
-	final_name = re.sub(r'[\\/:*?"<>|]+', "_", final_name)
-	save_path = save_root + "/" + final_name
-
-	# 이미 파일 존재하면 다운로드 안 하고 바로 반환
-	if os.path.exists(save_path):
-		return save_path, final_name
-
+async def post_spch_callback(payload: dict) -> None:
 	timeout = httpx.Timeout(60.0, connect=10.0)
-	headers = {"User-Agent": USER_AGENT}
-	verify_option = get_verify_options(ssl_mode)
-
-	async with httpx.AsyncClient(
-		headers=headers,
-		timeout=timeout,
-		follow_redirects=True,
-		verify=verify_option,
-	) as client:
-		response = await client.get(file_url)
+	async with httpx.AsyncClient(timeout=timeout) as client:
+		response = await client.post(
+			CALLBACK_INSERT_API_URL,
+			json=payload,
+			headers={"Content-Type": "application/json"},
+		)
 		response.raise_for_status()
 
-		with open(save_path, "wb") as f:
-			f.write(response.content)
 
-	return save_path, final_name
-
-
-async def run_minutes_all_and_callback(request: RegexCrawlRequest) -> None:
+async def run_spch_all_and_callback(request: SpchCrawlRequest) -> None:
 	try:
-		crawl_response = await crawl_minutes_regex_check(request, crawl_all=True)
-		payload = build_minutes_callback_payload(request, crawl_response)
-		await post_minutes_callback(payload)
+		crawl_response = await crawl_spch_regex_check(request, crawl_all=True)
+		payload = build_spch_callback_payload(request, crawl_response)
+		await post_spch_callback(payload)
 	except Exception as exc:
 		traceback.print_exc()
 		raise
 
 
 # =========================
-# Main crawl services
+# Main crawl service
 # =========================
 
-async def crawl_minutes_regex_check(
-	request: RegexCrawlRequest,
+async def crawl_spch_regex_check(
+	request: SpchCrawlRequest,
 	crawl_all: bool = False,
-) -> CrawlResponse:
+) -> SpchCrawlResponse:
 	if not request.item:
 		raise HTTPException(status_code=400, detail="item은 최소 1개 이상이어야 합니다.")
 
@@ -1089,11 +843,11 @@ async def crawl_minutes_regex_check(
 			detail=f"목록 페이지 요청 실패: {type(exc).__name__} / {str(exc)}",
 		) from exc
 
-	all_items: list[MinutesItem] = []
+	all_items: list[SpchItem] = []
 	seen_keys: set[str] = set()
 
 	for page_idx, (page_url, page_html) in enumerate(list_pages, start=1):
-		print(f"[CRAWL] ===== {page_idx} 페이지 처리 중 ===== URL: {page_url}")
+		print(f"[SPCH] ===== {page_idx} 페이지 처리 중 ===== URL: {page_url}")
 
 		candidates = extract_list_candidates(
 			html=page_html,
@@ -1106,7 +860,6 @@ async def crawl_minutes_regex_check(
 		if not candidates:
 			continue
 
-		# 최상단 게시물 skip 처리: 첫 페이지에서만 적용
 		if page_idx == 1 and request.param.skip_top_count > 0:
 			candidates = candidates[request.param.skip_top_count:]
 
@@ -1116,10 +869,9 @@ async def crawl_minutes_regex_check(
 		for idx, candidate in enumerate(candidates, start=1):
 			try:
 				current_rank = len(all_items) + 1
+				print(f"[SPCH] 현재 문서 색인 중: {current_rank}번째 | 제목: {candidate.get('title')}")
 
-				print(f"[CRAWL] 현재 문서 색인 중: {current_rank}번째 | 제목: {candidate.get('title')}")
-
-				item = await build_minutes_item_by_dynamic_regex(
+				item = await build_spch_item_by_dynamic_regex(
 					request=request,
 					list_page_url=page_url,
 					candidate=candidate,
@@ -1129,7 +881,7 @@ async def crawl_minutes_regex_check(
 			except ValueError as exc:
 				raise HTTPException(status_code=400, detail=str(exc)) from exc
 			except Exception as exc:
-				item = MinutesItem(
+				item = SpchItem(
 					rank=len(all_items) + 1,
 					list_title=candidate["title"],
 					detail_url=None,
@@ -1157,35 +909,8 @@ async def crawl_minutes_regex_check(
 			detail="지정한 selector 기준으로 목록 item 또는 target을 찾지 못했습니다.",
 		)
 
-	return CrawlResponse(
+	return SpchCrawlResponse(
 		list_url=str(request.param.list_url),
 		item_count=len(all_items),
 		items=all_items,
-	)
-
-
-# =========================
-# API
-# =========================
-
-@app.post("/crawl/all", response_model=CrawlStartResponse, status_code=202)
-async def crawl_all_api(
-	raw: CrawlRequest,
-	background_tasks: BackgroundTasks,
-):
-	request = parse_crawl_request(raw)
-
-	crw_id = request.crw_id or generate_crw_id()
-	request_dict = to_model_dict(request)
-	request_dict["crw_id"] = crw_id
-	request_copy = type(request)(**request_dict)
-
-	background_tasks.add_task(run_minutes_all_and_callback, request_copy)
-
-	return CrawlStartResponse(
-		req_id=request_copy.req_id,
-		type=request_copy.type,
-		crw_id=request_copy.crw_id,
-		ok="true",
-		message="전체 색인을 시작했습니다.",
 	)
