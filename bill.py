@@ -33,6 +33,14 @@ VIEW_ID_AUTO_PARAMS = r"[?&](uid|idx|code|no|seq|id|bill_no|billNo|idx_no|nttId|
 PAGE_PARAM_PATTERN = r'([?&](?:page|pageIndex|p|page_no|pageno|cPage|pageNum|page_id))=(\d+)'
 # 검색 버튼 함정 단어 (상단 메뉴 탭 배제용)
 TRAP_WORDS = ["엑셀", "초기화", "취소", "통합", "메뉴", "상세", "회기", "의안", "별검색", "다운", "연혁"]
+# 중복 컬럼 패턴 상수
+_P_BI_NO_SESN    = re.compile(r'^(.+?)\s*[\(\（]제\s*(\d+)\s*회[\)\）]')  # "2827 (제343회)"
+_P_NUMPR_SESN    = re.compile(r'제\s*(\d+)\s*대.*?제\s*(\d+)\s*회')       # "제8대 제266회"
+_P_NUMPR_ONLY    = re.compile(r'제\s*(\d+)\s*대')                        # "제8대"
+_P_SESN_ONLY     = re.compile(r'제\s*(\d+)\s*회')                        # "제266회"
+_P_DIGIT_ONLY    = re.compile(r'^\d+$')                                  # "8", "266"
+_P_SLASH_NUMPR_SESN = re.compile(r'(\d+)\s*대\s*/\s*제\s*(\d+)\s*회')     # "9대 / 제315회 임시회"
+_P_HYPHEN_NUMPR_SESN = re.compile(r'(\d+)\s*대\s*[-–—]\s*(\d+)\s*회')  # "9대-287회"
 
 # 상세 파라미터
 class ScrapeParam(BaseModel):
@@ -105,9 +113,7 @@ def save_to_json(data: Any, domain: str, prefix: str) -> str:
     print(f"[+] 저장: {filepath}", flush=True)
     return filepath
 def normalize_selector(selector: str) -> str:
-    """
-    클래스명(.name)이나 ID(#name)만 들어와도 Playwright가 인식할 수 있는 표준 셀렉터로 반환합니다.
-    """
+    """클래스명(.name)이나 ID(#name)만 들어와도 Playwright가 인식할 수 있는 표준 셀렉터로 반환합니다."""
     if not selector: return ""
     s = selector.strip()
     
@@ -131,6 +137,69 @@ def get_mapped_key(label: str, section: Optional[str] = None) -> str:
         if mk.replace(" ", "") == normalized:
             return mv
     return label
+
+def _parse_bi_no(value: str) -> Dict[str, str]:
+    """BI_NO + RASMBLY_SESN 분리"""
+    v = value.strip()
+    m = _P_BI_NO_SESN.match(v)
+    if m:
+        return {
+            "BI_NO":        m.group(1).strip(),
+            "RASMBLY_SESN": _to_int_str(m.group(2))
+        }
+    return {"BI_NO": v}
+
+
+def _parse_numpr_sesn(value: str) -> Dict[str, str]:
+    v = value.strip()
+
+    m = _P_NUMPR_SESN.search(v)
+    if m:
+        return {"RASMBLY_NUMPR": _to_int_str(m.group(1)),"RASMBLY_SESN":  _to_int_str(m.group(2))}
+
+    m = _P_SLASH_NUMPR_SESN.search(v)
+    if m:
+        return {"RASMBLY_NUMPR": _to_int_str(m.group(1)),"RASMBLY_SESN":  _to_int_str(m.group(2))}
+
+    m = _P_HYPHEN_NUMPR_SESN.search(v)
+    if m:
+        return {"RASMBLY_NUMPR": _to_int_str(m.group(1)),"RASMBLY_SESN":  _to_int_str(m.group(2))}
+
+    m = _P_NUMPR_ONLY.search(v)
+    if m:
+        return {"RASMBLY_NUMPR": _to_int_str(m.group(1))}
+
+    m = _P_SESN_ONLY.search(v)
+    if m:
+        return {"RASMBLY_SESN": _to_int_str(m.group(1))}
+
+    if _P_DIGIT_ONLY.match(v):
+        return {"RASMBLY_NUMPR": _to_int_str(v)}
+
+    return {}
+
+def _to_int_str(value: str) -> str:
+    """숫자만 추출해 문자열로 반환 (DB NUMBER 컬럼 대응)"""
+    m = re.search(r'\d+', value)
+    return m.group() if m else ""
+
+# ── 표준키 → 파서 함수 매핑 테이블 ────────────────────────
+# 새 파싱 규칙: 이 딕셔너리에만 추가
+VALUE_PARSERS: Dict[str, callable] = {
+    "BI_NO":              _parse_bi_no,
+    "RASMBLY_NUMPR_SESN": _parse_numpr_sesn,
+    "RASMBLY_NUMPR":      lambda v: {"RASMBLY_NUMPR": _to_int_str(v)},
+    "RASMBLY_SESN":       lambda v: {"RASMBLY_SESN":  _to_int_str(v)},
+}
+
+def parse_value(mapped_key: str, raw_value: str) -> Dict[str, str]:
+    """표준키와 원시값을 받아 DB 적재용 딕셔너리를 반환"""
+    parser = VALUE_PARSERS.get(mapped_key)
+    if parser:
+        result = parser(raw_value)
+        # 파서가 빈 딕셔너리를 반환하면(파싱 실패) 원본 보존
+        return result if result else {mapped_key: raw_value}
+    return {mapped_key: raw_value}
     
 # --- 브라우저 / 페이지네이션 헬퍼 ---
 
@@ -351,7 +420,13 @@ class UniversalCrawler:
                             result["BI_FILE_URL"] = urls[0] if len(urls) == 1 else urls
                     
                     mapped = get_mapped_key(label, section)
-                    result[mapped] = val
+
+                    parsed = parse_value(mapped, val)
+                    for k, v in parsed.items():
+                        if k not in result:      # 먼저 수집된 단독 컬럼 값 보호
+                            result[k] = v
+                    if "BI_NO" in parsed:        # BI_NO는 항상 정제값으로 덮어씀
+                        result["BI_NO"] = parsed["BI_NO"]
 
             except Exception as e:
                 print(f"[-] row 파싱 에러: {e}", flush=True)
@@ -409,8 +484,8 @@ class UniversalCrawler:
                     final_name = raw if re.search(r'\.[a-zA-Z0-9]{2,4}$', raw) else f"{raw}{ext}"
                     final_name = re.sub(r'[\\/*?:"<>|]', "", final_name) # 파일명 정규화
                     
-                    #save_path = os.path.join(FILE_DOWNLOAD_DIR, final_name) # 테스트용으로 로컬 저장
-                    #await download.save_as(save_path) # 테스트용으로 로컬 저장
+                    save_path = os.path.join(FILE_DOWNLOAD_DIR, final_name) # 테스트용으로 로컬 저장
+                    await download.save_as(save_path) # 테스트용으로 로컬 저장
                     
                     print(f"[+] 다운로드 완료: {final_name}", flush=True)
                     raw = final_name
@@ -568,17 +643,15 @@ async def execute_view_scraping(req: ScrapeRequest):
                     base = f"{parsed.scheme}://{parsed.netloc}"
                     
                     detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base)
-                    view_data.append({"view_id": vid, "view_url": target_url, **detail})
+                    view_data.append({"view_id": vid, "URL": target_url, **detail})
                     
                 except Exception as e:
                     print(f"    [!] ID: {vid} 수집 실패: {e}", flush=True)
-                    view_data.append({"view_id": vid, "view_url": target_url, "view_error": str(e)})
+                    view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
 
             # --- 루프 종료 후 공통 처리 (정상 종료 또는 중단 시 모두 실행) ---
             if view_data:
-                # 중단 여부에 따라 파일명 접미사 변경 (관리 편의성)
-                suffix = "interrupted" if app.state.stop_scraping else "view_all"
-                filepath = save_to_json(view_data, domain, suffix)
+                filepath = save_to_json(view_data, domain, "view_all")
                 print(f"[OK] 데이터 저장 완료 ({len(view_data)}건): {filepath}", flush=True)
 
                 # CMS(Java) API 전송 (중단 시점까지의 데이터 전송)
@@ -609,8 +682,7 @@ async def execute_view_scraping(req: ScrapeRequest):
             await browser.close()
 
 async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, data_list: list):
-    #target_url = "http://211.219.26.15:18123/insert_api.do"
-    target_url = "http://172.17.0.19:8080/insert_api.do"
+    target_url = "http://10.201.38.157:8080/insert_api.do"
     
     payload = {
         "reqId": req_id,
@@ -621,20 +693,22 @@ async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, data_list:
 
     print(f"\n[*] [3단계] 데이터 전송 시도 (JSON 방식)", flush=True)
     
+    # 즉시 응답 후 백그라운드에서 전송
+    await _do_send(target_url, payload)
+    print(f"[OK] {target_url} -> 전송 접수완료 (백그라운드 처리 중)", flush=True)
+    return True
+
+async def _do_send(target_url: str, payload: dict):
     async with httpx.AsyncClient() as client:
         try:
-            # json=payload 를 사용하면 자동으로 JSON Body 전송 및 헤더가 설정됩니다.
-            response = await client.post(target_url, json=payload, timeout=60.0)
+            response = await client.post(target_url, json=payload, timeout=120.0)
             
             if response.status_code == 200:
                 print(f"[OK] API 전송 성공", flush=True)
-                return True
             else:
-                print(f"[!] {target_url} 전송 완료 ", flush=True)
-                return False
+                print(f"[!] {target_url} 전송 완료", flush=True)
         except Exception as e:
             print(f"[!] 네트워크 오류: {str(e)}", flush=True)
-            return False
         
 async def handle_scraping_request(req: ScrapeRequest, background_tasks: BackgroundTasks):
     try:
@@ -651,7 +725,7 @@ async def handle_scraping_request(req: ScrapeRequest, background_tasks: Backgrou
         }
     except Exception as e:
         return error_response(f"요청 처리 중 오류 발생: {str(e)}")
-
+    
 # 2026.04.09 - 이성진 코드 추가
 # test용으로 1건만 수집하는 함수
 async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
@@ -734,31 +808,9 @@ async def handle_test_request(req: ScrapeRequest):
     }
     
 # --- API 엔드포인트 ---
-# [상세 수집] GET & POST
-@app.get("/crawl/bill")
-async def api_get_bill_view(background_tasks: BackgroundTasks, req: ScrapeRequest = Depends()):
-    return await handle_scraping_request(req, background_tasks)
-
-@app.post("/crawl/bill")
-async def api_post_bill_view(req: ScrapeRequest, background_tasks: BackgroundTasks):
-    return await handle_scraping_request(req, background_tasks)
-
-@app.get("/crawl/bill/status")
-async def api_status(job_id: str):
-    """작업 진행 상태 조회"""
-    return JOB_STORE.get(job_id, {"ok": False, "msg": "Job ID 없음"})
-
 @app.get("/crawl/bill/stop")
 async def api_stop():
     """크롤링 루프 즉시 중단"""
     app.state.stop_scraping = True
     print("[!] 외부 중단 요청 수신", flush=True)
     return {"ok": True, "message": "Stop requested. Current process will halt and save progress."} 
-
-# @app.get("/crawl/test")
-# async def api_get_test(req: ScrapeRequest = Depends()):
-#     return await handle_test_request(req)
-
-# @app.post("/crawl/test")
-# async def api_post_test(req: ScrapeRequest):
-#     return await handle_test_request(req)

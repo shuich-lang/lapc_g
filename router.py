@@ -25,9 +25,6 @@ router = APIRouter()
 class CrawlStatusRequest(BaseModel):
     req_id: str
 
-router.include_router(bill_app.router, tags=["Bill"])
-router.include_router(minutes_app.router, tags=["Minutes"])
-
 async def run_bill_job(req_obj):
     try:
         await set_job_running(req_obj.req_id)

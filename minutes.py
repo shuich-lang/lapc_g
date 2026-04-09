@@ -1172,13 +1172,6 @@ async def crawl_minutes_regex_check(
 async def health():
 	return {"status": "ok"}
 
-
-# @app.post("/crawl/test", response_model=CrawlResponse)
-# async def crawl_test_api(raw: CrawlRequest):
-# 	request = parse_crawl_request(raw)
-# 	return await crawl_minutes_regex_check(request, crawl_all=False)
-
-
 @app.post("/crawl/all", response_model=CrawlStartResponse, status_code=202)
 async def crawl_all_api(
 	raw: CrawlRequest,
