@@ -1,5 +1,4 @@
 ﻿import asyncio
-import json
 import os
 import re
 import httpx
@@ -65,11 +64,12 @@ class ScrapeRequest(BaseModel):
     req_id: str = Field(..., min_length=1, description="요청 식별자")
     type: str = Field(..., min_length=1, description="수집 타입")
     crw_id: str = Field(..., min_length=1, description="크롤러 식별자")
+    file_dir: str = Field(..., description="파일 저장 디렉토리")
     
     # 중첩 구조 정의
     param: ScrapeParam = Field(..., description="크롤링 상세 설정")
 
-    @field_validator('req_id', 'type', 'crw_id')
+    @field_validator('req_id', 'type', 'crw_id', 'file_dir')
     @classmethod
     def not_empty(cls, v: str, info: ValidationInfo):
         if not v or not v.strip():
@@ -184,6 +184,19 @@ def _to_int_str(value: str) -> str:
     """숫자만 추출해 문자열로 반환 (DB NUMBER 컬럼 대응)"""
     m = re.search(r'\d+', value)
     return m.group() if m else ""
+
+def build_save_path(req: "ScrapeRequest", year: str, bi_cn: str, seq: int, ext: str) -> str:
+    """저장 경로 생성 /{file_dir}/{type}/{crw_id}/{rasmbly_numpr}/{year}/CLICK{bi_cn}_{seq}.{ext}"""
+    root      = req.file_dir
+    req_type  = req.type
+    crw_id    = req.crw_id
+    rasmbly   = req.param.rasmbly_numpr or "0"
+    filename  = f"CLICK{bi_cn}_{seq}{ext}"
+    # path      = os.path.join(root, req_type, crw_id, rasmbly, year, filename) # 로컬용
+    path = os.path.join("/", root, req_type, crw_id, rasmbly, year, filename) # 운영개발용
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    print(f"[+] 저장 경로 생성: {path}", flush=True)
+    return path
 
 # ── 표준키 → 파서 함수 매핑 테이블 ────────────────────────
 # 새 파싱 규칙: 이 딕셔너리에만 추가
@@ -370,12 +383,13 @@ class UniversalCrawler:
         return items
 
     @staticmethod
-    async def extract_view_detail(page: Page, view_class: str, base_url: str) -> Dict[str, Any]:
+    async def extract_view_detail(page: Page, view_class: str, base_url: str, req: "ScrapeRequest", bi_cn: str = "") -> Dict[str, Any]:
         selector = normalize_selector(view_class)
         await page.wait_for_selector(selector, timeout=10000)
 
         result = {}
         section, rs_counter = None, 0
+        year = str(datetime.now().year)
 
         rows = await page.query_selector_all(f"{selector} tbody tr, {selector} > li, {selector} .view_row")
 
@@ -417,7 +431,10 @@ class UniversalCrawler:
                     is_meeting = "회의록" in label
 
                     if is_file or is_meeting:
-                        names, urls = await UniversalCrawler._extract_attachments(td_el, page, base_url, is_file)
+                        year = result.get("ITNC_DE", "")[:4] or str(datetime.now().year)
+                        names, urls = await UniversalCrawler._extract_attachments(
+                            td_el, page, base_url, is_file, req=req, bi_cn=bi_cn, year=year
+                        )
                         if is_file and names:
                             result["BI_FILE_NM"] = names[0] if len(names) == 1 else names
                             result["BI_FILE_URL"] = urls[0] if len(urls) == 1 else urls
@@ -438,16 +455,27 @@ class UniversalCrawler:
                 print(f"[-] row 파싱 에러: {e}", flush=True)
                 continue
 
+            if not result.get("BI_SJ"): # 평창군의회 한정 기능 (제목 하드 수집)
+                for sel in ("p.title", "h1.title", "h2.title", ".view_title", ".board_title", "#title"):
+                    try:
+                        el = await page.query_selector(sel)
+                        if el:
+                            text = clean_text(await el.inner_text())
+                            if text:
+                                result["BI_SJ"] = text
+                                print(f"[+] BI_SJ 수집 실패시 발동 수집: {sel} → {text[:30]}", flush=True)
+                                break
+                    except:
+                        continue
+
         return result
 
     @staticmethod
-    async def _extract_attachments(td_el, page: Page, base_url: str, is_file: bool) -> tuple:
-        """
-        첨부파일/회의록 링크 추출 및 파일 다운로드 (범용 엔진)
-        특징: 동적 폼 생성(평택시), 직접 다운로드, JS 호출 대응
-        """
+    async def _extract_attachments(td_el, page: Page, base_url: str, is_file: bool, req: "ScrapeRequest" = None, bi_cn: str = "", year: str = "") -> tuple:
+        """첨부파일/회의록 링크 추출 및 파일 다운로드 (범용 엔진)"""
         os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
         names, urls = [], []
+        seq = 0
         
         # 평택시처럼 span이나 기타 태그에 onclick이 걸린 경우를 위해 [onclick] 포함 탐색
         elements = await td_el.query_selector_all("a, span[onclick], [style*='cursor: pointer']")
@@ -483,19 +511,22 @@ class UniversalCrawler:
                     download = await dl_info.value
                     
                     # 파일명 결정 로직 (서버 제안 이름 vs 웹 표시 이름)
-                    suggested_filename = download.suggested_filename
+                    suggested_filename = download.suggested_filename or ""
                     _, ext = os.path.splitext(suggested_filename)
-                    
-                    # 웹상 이름(raw)에 확장자가 없으면 서버가 준 확장자 붙여줌
-                    final_name = raw if re.search(r'\.[a-zA-Z0-9]{2,4}$', raw) else f"{raw}{ext}"
-                    final_name = re.sub(r'[\\/*?:"<>|]', "", final_name) # 파일명 정규화
-                    
-                    save_path = os.path.join(FILE_DOWNLOAD_DIR, final_name) # 테스트용으로 로컬 저장
-                    await download.save_as(save_path) # 테스트용으로 로컬 저장
-                    
-                    print(f"[+] 다운로드 완료: {final_name}", flush=True)
-                    raw = final_name
-                    url_val = download.url # 실제 다운로드된 최종 URL 저장
+                    if not ext:
+                        ext = ".bin"
+
+                    seq += 1
+                    if req and bi_cn:
+                        save_path = build_save_path(req, year, bi_cn, seq, ext)
+                    else:
+                        os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
+                        save_path = os.path.join(FILE_DOWNLOAD_DIR, f"CLICK{time.time_ns()}_{seq}{ext}")
+
+                    await download.save_as(save_path)
+                    print(f"[+] 다운로드 완료: {save_path}", flush=True)
+                    raw     = os.path.basename(save_path)
+                    url_val = download.url
 
                 except Exception as e:
                     # 실패 시 로그를 상세히 남기되 프로세스는 유지
@@ -648,8 +679,9 @@ async def execute_view_scraping(req: ScrapeRequest):
                     parsed = urlparse(target_url)
                     base = f"{parsed.scheme}://{parsed.netloc}"
                     
-                    detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base)
-                    view_data.append({"view_id": vid, "URL": target_url, "BI_CN": f"CLICK{time.time_ns()}", **detail})
+                    bi_cn  = str(time.time_ns())
+                    detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base, req=req, bi_cn=bi_cn)
+                    view_data.append({"view_id": vid, "URL": target_url, "BI_CN": f"CLICK{bi_cn}", **detail})
                     
                 except Exception as e:
                     print(f"    [!] ID: {vid} 수집 실패: {e}", flush=True)
@@ -666,6 +698,7 @@ async def execute_view_scraping(req: ScrapeRequest):
                     req_id=req.req_id,
                     type_val=req.type,
                     crw_id=req.crw_id,
+                    file_dir=req.file_dir,
                     data_list=view_data
                 )
             else:
@@ -675,6 +708,7 @@ async def execute_view_scraping(req: ScrapeRequest):
                 "req_id": req.req_id, 
                 "type": req.type, 
                 "crw_id": req.crw_id, 
+                "file_dir": req.file_dir,
                 "ok": True, 
                 "interrupted": app.state.stop_scraping,
                 "data_count": len(view_data), 
@@ -683,17 +717,18 @@ async def execute_view_scraping(req: ScrapeRequest):
 
         except Exception as e:
             print(f"\n[!] 상세 수집 전체 에러: {e}", flush=True)
-            return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id, "ok": False, "error_msg": str(e)}
+            return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id, "file_dir": req.file_dir, "ok": False, "error_msg": str(e)}
         finally:
             await browser.close()
 
-async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, data_list: list):
+async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, file_dir: str, data_list: list):
     target_url = "http://10.201.38.157:8080/insert_api.do"
     
     payload = {
         "reqId": req_id,
         "type": type_val,
         "agency": crw_id,
+        "fileDir": file_dir,
         "data": data_list
     }
 
@@ -726,6 +761,7 @@ async def handle_scraping_request(req: ScrapeRequest, background_tasks: Backgrou
             "req_id": req.req_id,
             "type": req.type,
             "crw_id": req.crw_id,
+            "file_dir": req.file_dir,
             "ok": True,
             "message": "수집 요청 완료"
         }
@@ -761,6 +797,7 @@ async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
                     "req_id": req.req_id,
                     "type": req.type,
                     "crw_id": req.crw_id,
+                    "file_dir": req.file_dir,
                     "data": [],
                 }
 
@@ -779,8 +816,10 @@ async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
                     await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
                     parsed_url = urlparse(target_url)
                     base = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                    detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base)
-                    view_data.append({"view_id": vid, "view_url": target_url, "BI_CN": f"CLICK{time.time_ns()}" **detail})
+                    bi_cn  = str(time.time_ns())
+                    detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base, req=req, bi_cn=bi_cn)
+                    print(f"[TEST] 상세 수집 완료: {vid} / BI_CN: CLICK{bi_cn}", flush=True)
+                    view_data.append({"view_id": vid, "view_url": target_url, "BI_CN": f"CLICK{bi_cn}", **detail})
                 except Exception as e:
                     print(f"[TEST] 상세 수집 실패: {e}", flush=True)
                     view_data.append({"view_id": vid, "view_url": target_url, "view_error": str(e)})
@@ -789,6 +828,7 @@ async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
                 "req_id": req.req_id,
                 "type": req.type,
                 "crw_id": req.crw_id,
+                "file_dir": req.file_dir,
                 "data": view_data,
             }
 
@@ -798,6 +838,7 @@ async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
                 "req_id": req.req_id,
                 "type": req.type,
                 "crw_id": req.crw_id,
+                "file_dir": req.file_dir,
                 "data": [],
             }
         finally:
@@ -810,6 +851,7 @@ async def handle_test_request(req: ScrapeRequest):
         "req_id": req.req_id,
         "type": req.type,
         "crw_id": req.crw_id,
+        "file_dir": req.file_dir,
         "ok": True
     }
     
