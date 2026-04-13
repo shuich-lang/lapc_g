@@ -130,6 +130,7 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
         "req_id": json_data.get("req_id"),
         "type": req_type,
         "crw_id": json_data.get("crw_id"),
+        "file_dir": json_data.get("file_dir"),
         "ok": True,
         "message": f"[{req_type}] 수집 작업을 시작했습니다."
     }

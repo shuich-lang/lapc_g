@@ -302,9 +302,35 @@ class UniversalCrawler:
                 # 버튼이 나타날 때까지 짧게 대기 후 클릭
                 btn = await page.wait_for_selector(btn_sel, timeout=5000, state="visible")
                 if btn:
-                    async with page.expect_navigation(timeout=10000):
+                    # ★ 핵심 수정: navigation 여부를 모름 → 분기 처리
+                    onclick_val = await btn.get_attribute("onclick") or ""
+                    href_val = await btn.get_attribute("href") or ""
+                    is_ajax = (
+                        href_val in ("#", "", "javascript:void(0)") or
+                        "return false" in onclick_val or
+                        "loading" in onclick_val.lower() or
+                        "ajax" in onclick_val.lower() or
+                        "fetch" in onclick_val.lower()
+                    )
+
+                    if is_ajax:
+                        # AJAX 버튼: navigation 없이 클릭 후 결과 영역 대기
+                        print(f"[*] AJAX 버튼 감지 → navigation 없이 클릭", flush=True)
                         await btn.click()
-                    print("[+] 검색 버튼 클릭 성공", flush=True)
+                        # 결과가 list_class 영역에 주입될 때까지 대기
+                        await page.wait_for_function(
+                            f"""() => {{
+                                const el = document.querySelector('{normalize_selector(list_class)} tbody tr');
+                                return el !== null;
+                            }}""",
+                            timeout=15000
+                        )
+                    else:
+                        # 일반 페이지 이동 버튼
+                        async with page.expect_navigation(timeout=10000):
+                            await btn.click()
+
+                print("[+] 검색 버튼 클릭 성공", flush=True)
             except:
                 # 버튼 클릭 실패 시 폼 직접 제출 (form_sel 활용)
                 print(f"[!] 버튼 클릭 실패, 폼({form_sel}) 직접 제출 시도...", flush=True)
@@ -432,12 +458,20 @@ class UniversalCrawler:
 
                     if is_file or is_meeting:
                         year = result.get("ITNC_DE", "")[:4] or str(datetime.now().year)
-                        names, urls = await UniversalCrawler._extract_attachments(
+                        attachments = await UniversalCrawler._extract_attachments(
                             td_el, page, base_url, is_file, req=req, bi_cn=bi_cn, year=year
                         )
-                        if is_file and names:
-                            result["BI_FILE_NM"] = names[0] if len(names) == 1 else names
-                            result["BI_FILE_URL"] = urls[0] if len(urls) == 1 else urls
+                        if is_file and attachments:
+                            result["BI_FILE_NM"]   = [a["original_name"] for a in attachments]
+                            result["BI_FILE_PATH"] = [a["file_path"]     for a in attachments]
+                            result["BI_FILE_ID"]   = [a["file_id"]       for a in attachments]
+                            result["BI_FILE_URL"]  = [a["url"]           for a in attachments]
+
+                            if len(attachments) == 1:
+                                result["BI_FILE_NM"]   = attachments[0]["original_name"]
+                                result["BI_FILE_PATH"] = attachments[0]["file_path"]
+                                result["BI_FILE_ID"]   = attachments[0]["file_id"]
+                                result["BI_FILE_URL"]  = attachments[0]["url"]
                     
                     mapped = get_mapped_key(label, section)
 
@@ -467,54 +501,65 @@ class UniversalCrawler:
                                 break
                     except:
                         continue
+        
+        # req에서 받은 값으로 빈 필드 보완
+        FALLBACK_FIELDS = {
+            "RASMBLY_NUMPR": getattr(req.param, "rasmbly_numpr", None),
+        }
+        for field, fallback_val in FALLBACK_FIELDS.items():
+            if not result.get(field) and fallback_val:
+                result[field] = str(fallback_val)
 
         return result
 
     @staticmethod
-    async def _extract_attachments(td_el, page: Page, base_url: str, is_file: bool, req: "ScrapeRequest" = None, bi_cn: str = "", year: str = "") -> tuple:
-        """첨부파일/회의록 링크 추출 및 파일 다운로드 (범용 엔진)"""
+    async def _extract_attachments(td_el, page: Page, base_url: str, is_file: bool, req: "ScrapeRequest" = None, bi_cn: str = "", year: str = "") -> list:
+        """첨부파일 BILL_ATTACHMENT 테이블용 정보 추출"""
         os.makedirs(FILE_DOWNLOAD_DIR, exist_ok=True)
-        names, urls = [], []
+        attachments = []
         seq = 0
-        
-        # 평택시처럼 span이나 기타 태그에 onclick이 걸린 경우를 위해 [onclick] 포함 탐색
+
         elements = await td_el.query_selector_all("a, span[onclick], [style*='cursor: pointer']")
-        
+
         for el in elements:
             raw = clean_text(await el.inner_text())
-            title = clean_text(await el.get_attribute("title")) or ""
-            
-            # 필터링 로직 (유지보수 용이하도록 목록화)
+            title_el = await el.query_selector("[title]")
+            title = clean_text(await title_el.get_attribute("title")) if title_el else ""
+            if not title:
+                title = clean_text(await el.inner_text()) or ""
+
             skip_keywords = ["바로보기", "바로듣기", "미리보기", "뷰어"]
             if is_file and (any(k in raw for k in skip_keywords) or any(k in title for k in skip_keywords)):
                 continue
-            if not raw: continue
+            if not raw:
+                continue
 
-            # 메타데이터 수집
             href = await el.get_attribute("href") or ""
             onclick = await el.get_attribute("onclick") or ""
             is_js = href.startswith(("javascript", "#")) or (onclick and not href)
             url_val = onclick if is_js else (href or onclick)
 
+            original_name = raw  # ★ 원본명 미리 보관
+            save_name = raw
+            file_path = ""
+
             if is_file:
                 print(f"[*] 다운로드 시도: {raw}", flush=True)
                 try:
-                    # [유지보수 포인트] target="_blank"는 새 탭을 띄워 이벤트를 분산시키므로 현재 창으로 강제
                     await el.evaluate("node => { if(node.tagName === 'A') node.removeAttribute('target'); }")
 
-                    # [핵심] expect_download는 '클릭'에 의한 결과물로 다운로드 이벤트를 기다림
-                    # 평택시처럼 폼을 생성해서 날리는 경우도 Playwright는 이 이벤트를 캐치함
                     async with page.expect_download(timeout=15000) as dl_info:
-                        # 클릭 시 자바스크립트 에러 방지를 위해 dispatch_event 또는 click 사용
                         await el.click()
 
                     download = await dl_info.value
-                    
-                    # 파일명 결정 로직 (서버 제안 이름 vs 웹 표시 이름)
+
                     suggested_filename = download.suggested_filename or ""
                     _, ext = os.path.splitext(suggested_filename)
                     if not ext:
                         ext = ".bin"
+
+                    # ★ 원본명: suggested_filename 우선, 없으면 화면 텍스트
+                    original_name = title if title else raw
 
                     seq += 1
                     if req and bi_cn:
@@ -525,28 +570,33 @@ class UniversalCrawler:
 
                     await download.save_as(save_path)
                     print(f"[+] 다운로드 완료: {save_path}", flush=True)
-                    raw     = os.path.basename(save_path)
-                    url_val = download.url
+
+                    save_name = os.path.basename(save_path).replace("\\", "/")   # ★ CLICK123_1.hwp
+                    file_path = save_path.replace("\\", "/")                      # ★ 전체 경로
+                    url_val   = download.url
 
                 except Exception as e:
-                    # 실패 시 로그를 상세히 남기되 프로세스는 유지
                     print(f"[-] 다운로드 건너뜀 ({raw}): {str(e)[:100]}", flush=True)
-                    
-                    # [보충] 다운로드 실패 시에도 최소한 URL은 절대 경로로 확보 시도
+                    seq += 1  # 실패해도 seq 증가 (순서 일관성)
                     if not url_val.startswith("http") and url_val:
                         url_val = urljoin(base_url, url_val)
-
-                    # Context Destroyed 방지용 복구: URL이 변했다면 다시 돌아옴
                     if page.url != base_url:
                         try:
                             await page.goto(base_url, wait_until="domcontentloaded", timeout=5000)
                         except:
                             pass
+            else:
+                seq += 1
 
-            names.append(raw)
-            urls.append(url_val)
-            
-        return names, urls
+            attachments.append({
+                "original_name": original_name,
+                "save_name":     save_name,
+                "file_path":     file_path,
+                "file_id":       str(seq),
+                "url":           url_val,
+            })
+
+        return attachments
 
     @staticmethod
     async def get_total_pages(page: Page, end_btn_selector: str = None) -> int:
@@ -615,7 +665,13 @@ class UniversalCrawler:
             
             if await link.count() > 0:
                 await link.click()
-                await page.wait_for_load_state("domcontentloaded")
+                try:
+                    await page.wait_for_function(
+                        "() => document.querySelectorAll('tbody#searchList tr').length > 0",
+                        timeout=10000
+                    )
+                except:
+                    await page.wait_for_timeout(1000)  # fallback
                 return True
 
             # [수정] 다음 버튼 역시 a 태그 제약 없이 n_sel 그 자체를 클릭
