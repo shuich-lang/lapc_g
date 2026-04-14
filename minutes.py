@@ -623,7 +623,7 @@ def extract_file_info_from_reserved_value(
 	raw_value = normalize_text(raw_file_value)
 
 	if not raw_value:
-		raise ValueError("__file_url__ 값이 비어 있습니다.")
+		raise ValueError("ORIGINL_FILE_URL 값이 비어 있습니다.")
 
 	# <a ...>...</a> 전체가 넘어온 경우
 	if "<a" in raw_value.lower():
@@ -631,13 +631,13 @@ def extract_file_info_from_reserved_value(
 		a_tag = soup.find("a")
 
 		if not a_tag:
-			raise ValueError("__file_url__에서 a 태그를 찾지 못했습니다.")
+			raise ValueError("ORIGINL_FILE_URL에서 a 태그를 찾지 못했습니다.")
 
 		href = normalize_text(a_tag.get("href"))
 		file_name = normalize_text(a_tag.get_text(" ", strip=True))
 
 		if not href:
-			raise ValueError("__file_url__ a 태그에 href가 없습니다.")
+			raise ValueError("ORIGINL_FILE_URL a 태그에 href가 없습니다.")
 
 		return urljoin(base_url, href), (file_name or None)
 
@@ -976,7 +976,7 @@ async def build_minutes_item_by_dynamic_regex(
 		list_title=title,
 	)
 
-	file_value = parsed.pop("__file_url__", None)
+	file_value = parsed.pop("ORIGINL_FILE_URL", None)
 
 	if file_value:
 		try:
@@ -992,12 +992,14 @@ async def build_minutes_item_by_dynamic_regex(
 				ssl_mode=request.param.ssl_mode,
 			)
 
-			parsed["file_path"] = saved_path
-			parsed["file_name"] = saved_name
+			parsed["ORIGINL_FILE_URL"] = full_file_url
+			parsed["MINTS_FILE_PATH"] = saved_path
+			parsed["ORGINL_FILE_NM"] = saved_name
 
 		except Exception as exc:
-			parsed["file_path"] = None
-			parsed["file_name"] = None
+			parsed["ORIGINL_FILE_URL"] = None
+			parsed["MINTS_FILE_PATH"] = None
+			parsed["ORGINL_FILE_NM"] = None
 			note = f"{note} / 첨부파일 다운로드 실패: {type(exc).__name__}" if note else f"첨부파일 다운로드 실패: {type(exc).__name__}"
 
 	return MinutesItem(
@@ -1026,20 +1028,6 @@ async def download_attachment_file(
 
 	final_name = normalize_text(file_name)
 
-	if not final_name:
-		path_name = urlparse(file_url).path.split("/")[-1]
-		final_name = unquote(path_name) if path_name else ""
-
-	if not final_name:
-		final_name = f"{req_id}.bin"
-
-	final_name = re.sub(r'[\\/:*?"<>|]+', "_", final_name)
-	save_path = save_root + "/" + final_name
-
-	# 이미 파일 존재하면 다운로드 안 하고 바로 반환
-	if os.path.exists(save_path):
-		return save_path, final_name
-
 	timeout = httpx.Timeout(60.0, connect=10.0)
 	headers = {"User-Agent": USER_AGENT}
 	verify_option = get_verify_options(ssl_mode)
@@ -1052,6 +1040,34 @@ async def download_attachment_file(
 	) as client:
 		response = await client.get(file_url)
 		response.raise_for_status()
+
+		# Content-Disposition 헤더에서 파일명 추출 시도
+		if not final_name:
+			content_disposition = response.headers.get("content-disposition", "")
+			if content_disposition:
+				cd_match = re.search(
+					r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)',
+					content_disposition,
+					re.IGNORECASE,
+				)
+				if cd_match:
+					final_name = unquote(cd_match.group(1).strip())
+
+		# Content-Disposition에도 없으면 URL path에서 추출
+		if not final_name:
+			path_name = urlparse(file_url).path.split("/")[-1]
+			final_name = unquote(path_name) if path_name else ""
+
+		# 그래도 없으면 req_id로 fallback
+		if not final_name:
+			final_name = f"{req_id}.bin"
+
+		final_name = re.sub(r'[\\/:*?"<>|]+', "_", final_name)
+		save_path = save_root + "/" + final_name
+
+		# 이미 파일 존재하면 다운로드 안 하고 바로 반환
+		if os.path.exists(save_path):
+			return save_path, final_name
 
 		with open(save_path, "wb") as f:
 			f.write(response.content)
