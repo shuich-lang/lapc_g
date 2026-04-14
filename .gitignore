@@ -16,6 +16,9 @@ attachment/
 # 요청 파일
 requests/
 
+# 로그 파일
+logs/
+
 # 에디터
 .vscode/
 
