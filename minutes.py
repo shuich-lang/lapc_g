@@ -1110,12 +1110,12 @@ async def build_minutes_item_by_dynamic_regex(
 				ssl_mode=request.param.ssl_mode,
 			)
 
-			parsed["ORIGINL_FILE_URL"] = full_file_url
+			parsed["ORGINL_FILE_URL"] = full_file_url
 			parsed["MINTS_FILE_PATH"] = save_path
 			parsed["ORGINL_FILE_NM"] = saved_name
 
 		except Exception as exc:
-			parsed["ORIGINL_FILE_URL"] = None
+			parsed["ORGINL_FILE_URL"] = None
 			parsed["MINTS_FILE_PATH"] = None
 			parsed["ORGINL_FILE_NM"] = None
 			note = f"{note} / 첨부파일 다운로드 실패: {type(exc).__name__}" if note else f"첨부파일 다운로드 실패: {type(exc).__name__}"
