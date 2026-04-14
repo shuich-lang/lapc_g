@@ -171,14 +171,14 @@ async def integrated_crawl_test_api(request: Request):
 
 
 @router.get("/crawl/status")
-async def integrated_crawl_status_api(body: CrawlStatusRequest):
-    job = await get_job(body.req_id)
+async def integrated_crawl_status_api(req_id: str):
+    job = await get_job(req_id)
 
     if not job:
         return JSONResponse(
             status_code=200,
             content={
-                "req_id": body.req_id,
+                "req_id": req_id,
                 "status": "NOT_FOUND"
             }
         )
