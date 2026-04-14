@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import asyncio
 import re
+import time
 from typing import Optional
 from urllib.parse import (
 	urljoin,
@@ -94,6 +95,7 @@ class MinutesItem(BaseModel):
 	fields: dict[str, Optional[str]] = Field(default_factory=dict)
 
 	uid: Optional[str] = None
+	mints_cn: Optional[str] = None
 
 	raw_href: Optional[str] = None
 	raw_onclick: Optional[str] = None
@@ -403,6 +405,7 @@ def build_minutes_callback_payload(
 		if item.fields:
 			row = dict(item.fields)
 			row["url"] = item.detail_url
+			row["mints_cn"] = item.mints_cn
 			data.append(row)
 
 	return {
@@ -954,6 +957,7 @@ async def build_minutes_item_by_dynamic_regex(
 	)
 
 	uid = extract_uid(detail_url)
+	mints_cn = str(time.time_ns())
 
 	if not detail_html:
 		return MinutesItem(
@@ -965,6 +969,7 @@ async def build_minutes_item_by_dynamic_regex(
 			detail_access_success=False,
 			fields={},
 			uid=uid,
+			mints_cn=mints_cn,
 			raw_href=href,
 			raw_onclick=onclick,
 			note=note or "상세 view 접근 실패",
@@ -1011,6 +1016,7 @@ async def build_minutes_item_by_dynamic_regex(
 		detail_access_success=True,
 		fields=parsed,
 		uid=uid,
+		mints_cn=mints_cn,
 		raw_href=href,
 		raw_onclick=onclick,
 		note=note,
