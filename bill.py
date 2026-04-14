@@ -1,4 +1,4 @@
-﻿import asyncio
+﻿
 import os
 import re
 import httpx
@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin, urlparse
 from pydantic import BaseModel, Field, field_validator, ValidationInfo
 from typing import Optional
-from fastapi import FastAPI, Depends, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright, Page
 import time
@@ -24,14 +24,13 @@ app.state.stop_scraping = False
 DOWNLOAD_DIR = "download"
 FILE_DOWNLOAD_DIR = "attachment"
 # FILE_DOWNLOAD_DIR = "/clicker-apps/diquest/fileDown/tempDir"
-JOB_STORE: Dict[str, Dict[str, Any]] = {}
 
 # 차단할 리소스 타입
 BLOCKED_RESOURCES = {"image", "stylesheet", "media", "font"}
 # view_id 자동 탐지용 파라미터 패턴
 VIEW_ID_AUTO_PARAMS = r"[?&](uid|idx|code|no|seq|id|bill_no|billNo|idx_no|nttId|uuid)=([^&]+)"
 # 페이지 파라미터 패턴 (페이지네이션 URL 치환용)
-PAGE_PARAM_PATTERN = r'([?&](?:page|pageIndex|p|page_no|pageno|cPage|pageNum|page_id))=(\d+)'
+PAGE_PARAM_PATTERN = r'([?&](?:page|pageIndex|p|page_no|pageno|cPage|pageNum|page_id|cp))=(\d+)'
 # 검색 버튼 함정 단어 (상단 메뉴 탭 배제용)
 TRAP_WORDS = ["엑셀", "초기화", "취소", "통합", "메뉴", "상세", "회기", "의안", "별검색", "다운", "연혁"]
 # 중복 컬럼 패턴 상수
@@ -195,7 +194,6 @@ def build_save_path(req: "ScrapeRequest", year: str, bi_cn: str, seq: int, ext: 
     # path      = os.path.join(root, req_type, crw_id, rasmbly, year, filename) # 로컬용
     path = os.path.join("/", root, req_type, crw_id, rasmbly, year, filename) # 운영개발용
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    print(f"[+] 저장 경로 생성: {path}", flush=True)
     return path
 
 # ── 표준키 → 파서 함수 매핑 테이블 ────────────────────────
@@ -349,6 +347,11 @@ class UniversalCrawler:
     def _extract_view_id(href: str, onclick: str, row_html: str, view_id_param: str) -> Optional[str]:
         """3중 ID 추출: href 파라미터 -> row HTML -> JS 함수 인자"""
         clean_href = href.replace("&amp;", "&") if href else ""
+        # 0차: path 타입 명시 시 즉시 처리
+        if not view_id_param or view_id_param.strip() == "":
+            if clean_href and not clean_href.startswith(("javascript", "#")):
+                m = re.search(r"/(\d+)(?:[/?#]|$)", clean_href)
+                if m: return m.group(1)
         # 1차: href에서 지정 파라미터 추출
         if clean_href and not clean_href.startswith(("javascript", "#")):
             m = re.search(rf"[?&]{re.escape(view_id_param)}=([^&]+)", clean_href)
@@ -381,6 +384,18 @@ class UniversalCrawler:
             if text: info["bi_sj"] = text
         else:
             info["onclick"] = tr_onclick
+            # 서울특별시의회 뷰 상세 링크는 onclick에 goDetail('의안번호', '대수', '회기', '의안종류', '의안번호') 형태로 들어있음
+            m = re.search(r"goDetail\s*\(\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", tr_onclick)
+            if m:
+                prop_type, gen_num, bill_no, bill_type, bill_num = m.groups()
+                info["href"] = (
+                    f"/info/billRead.do?menuId=006002003"
+                    f"&propTypeCd={prop_type}"
+                    f"&generationNum={gen_num}"
+                    f"&billNo={bill_no}"
+                    f"&billTypeCd={bill_type}"
+                    f"&billNum={bill_num}"
+                )
             for td in tds:
                 title = await td.get_attribute("title")
                 if title:
@@ -427,18 +442,34 @@ class UniversalCrawler:
                 ths = await row.query_selector_all("th, dt, strong, .label, .title")
                 if not ths:
                     ths = await row.query_selector_all("td[colspan]")
-                tds = await row.query_selector_all("td, dd, span, .value, .cont")
+                tds = await row.query_selector_all("td, dd, .value, .cont")
+                if not tds:
+                    tds = await row.query_selector_all("span")
                 pairs = []
 
                 if not ths and tds:
-                    text_content = clean_text(await tds[0].inner_text())
-                    if text_content:
-                        html = await tds[0].inner_html()
-                        label = "본문내용_첨부파일" if any(k in html.lower() for k in ["down", "첨부", "file"]) else "본문내용"
-                        pairs.append((label, tds[0]))
+                    if len(tds) >= 2:
+                        label_text = clean_text(await tds[0].inner_text())
+                        if label_text:
+                            pairs.append((label_text, tds[-1]))
+                    else:
+                        text_content = clean_text(await tds[0].inner_text())
+                        if text_content:
+                            html = await tds[0].inner_html()
+                            label = "본문내용_첨부파일" if any(k in html.lower() for k in ["down", "첨부", "file"]) else "본문내용"
+                            pairs.append((label, tds[0]))
                 else:
+                    # ths가 td[colspan]으로 채워진 경우, tds에서 colspan td 제외
+                    tds_filtered = []
+                    for td in tds:
+                        cp = await td.get_attribute("colspan")
+                        if not cp:
+                            tds_filtered.append(td)
+                    
+                    # colspan td가 라벨로 잡힌 경우 tds_filtered를 값으로 사용
                     ti, di = 0, 0
-                    while ti < len(ths) and di < len(tds):
+                    use_tds = tds_filtered if tds_filtered else tds
+                    while ti < len(ths) and di < len(use_tds):
                         rs = await ths[ti].get_attribute("rowspan")
                         th_text = clean_text(await ths[ti].inner_text())
                         
@@ -448,7 +479,7 @@ class UniversalCrawler:
                             if ti >= len(ths): break
                             th_text = clean_text(await ths[ti].inner_text())
                         
-                        pairs.append((th_text, tds[di]))
+                        pairs.append((th_text, use_tds[di]))
                         ti += 1; di += 1
 
                 for label, td_el in pairs:
@@ -462,16 +493,17 @@ class UniversalCrawler:
                             td_el, page, base_url, is_file, req=req, bi_cn=bi_cn, year=year
                         )
                         if is_file and attachments:
-                            result["BI_FILE_NM"]   = [a["original_name"] for a in attachments]
-                            result["BI_FILE_PATH"] = [a["file_path"]     for a in attachments]
-                            result["BI_FILE_ID"]   = [a["file_id"]       for a in attachments]
-                            result["BI_FILE_URL"]  = [a["url"]           for a in attachments]
+                            # 항상 문자열로 직렬화 (단건/다건 통일)
+                            names = [a["original_name"] for a in attachments]
+                            paths = [a["file_path"]     for a in attachments]
+                            ids   = [a["file_id"]       for a in attachments]
+                            urls  = [a["url"]           for a in attachments]
 
-                            if len(attachments) == 1:
-                                result["BI_FILE_NM"]   = attachments[0]["original_name"]
-                                result["BI_FILE_PATH"] = attachments[0]["file_path"]
-                                result["BI_FILE_ID"]   = attachments[0]["file_id"]
-                                result["BI_FILE_URL"]  = attachments[0]["url"]
+                            import json
+                            result["BI_FILE_NM"]   = names[0] if len(names) == 1 else json.dumps(names,  ensure_ascii=False)
+                            result["BI_FILE_PATH"] = paths[0] if len(paths) == 1 else json.dumps(paths,  ensure_ascii=False)
+                            result["BI_FILE_ID"]   = ids[0]   if len(ids)   == 1 else json.dumps(ids,    ensure_ascii=False)
+                            result["BI_FILE_URL"]  = urls[0]  if len(urls)  == 1 else json.dumps(urls,   ensure_ascii=False)
                     
                     mapped = get_mapped_key(label, section)
 
@@ -489,8 +521,8 @@ class UniversalCrawler:
                 print(f"[-] row 파싱 에러: {e}", flush=True)
                 continue
 
-            if not result.get("BI_SJ"): # 평창군의회 한정 기능 (제목 하드 수집)
-                for sel in ("p.title", "h1.title", "h2.title", ".view_title", ".board_title", "#title"):
+            if not result.get("BI_SJ"): # 평창군의회,부산시의회,서울특별시의회,종로구의회 등 한정 기능 (제목 하드 수집)
+                for sel in ("table[summary='제목'] td", "div.ViewBoxHead", "th.vision2Tit", "p.title", "h1.title", "h2.title", "div.view_top h2", ".view_title", ".board_title", "#title", "thead th[colspan]", "div.bbs_vtop h4"):
                     try:
                         el = await page.query_selector(sel)
                         if el:
@@ -623,7 +655,7 @@ class UniversalCrawler:
                 
                 combined = f"{href} {onclick} {text}"
                 
-                m = re.search(r'(?:fn[a-zA-Z_]*|pageIndex|pageNum|pageNo|page|go|move|schPageNo)\s*[\(=]\s*[\'"]?(\d+)[\'"]?', combined, re.IGNORECASE)
+                m = re.search(r'(?:fn[a-zA-Z_]*|pageIndex|pageNum|pageNo|page|go|move|schPageNo|cp)\s*[\(=]\s*[\'"]?(\d+)[\'"]?', combined, re.IGNORECASE)
                 
                 if m:
                     total = int(m.group(1))
@@ -631,7 +663,7 @@ class UniversalCrawler:
 
             # 2. 버튼으로 못 찾았을 경우, 현재 보이는 숫자 중 최대값 (Fallback)
             mx = 1
-            paging_links = await page.query_selector_all(".paging a, .pagination a, #pagingNav a, .paging strong")
+            paging_links = await page.query_selector_all(".paging a, .paging2 a, .pagination a, #pagingNav a, .paging strong")
             for b in paging_links:
                 t = (await b.inner_text()).strip()
                 if t.isdigit():
