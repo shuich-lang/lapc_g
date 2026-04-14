@@ -39,8 +39,8 @@ USER_AGENT = (
 )
 
 # CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"		# 실제 CMS 서버 (도커 외부에서 접근용)
-# CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
-CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
+CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
+# CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
 # CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
@@ -57,6 +57,7 @@ class MinutesParam(BaseModel):
 	target_selector: str = Field(...)
 	ssl_mode: str = Field("Y")
 	max_pages: int = Field(500)
+	rasmbly_numpr: Optional[str] = Field(None, description="대수 정보. 목록/상세에서 추출 실패 시 fallback으로 사용")
 	skip_top_count: int = Field(0, description="목록 상단에서 크롤링을 건너뛸 아이템 수. 기본값 0")
 
 
@@ -71,6 +72,7 @@ class CrawlRequest(BaseModel):
 	req_id: str = Field(..., description="날짜 포맷: yyyyMMddHHmmssSSSSSS")
 	crw_id: Optional[str] = Field(None, description="수집 설정 구분값")
 	type: str = Field(..., description="수집 유형: minutes, bill 등")
+	file_dir: str = Field("", description="파일 저장 절대 경로")
 	param: dict = Field(..., description="type별 크롤링 파라미터")
 	item: list[RegexItem] = Field(default_factory=list, description="동적으로 추출할 항목 목록")
 
@@ -79,6 +81,7 @@ class RegexCrawlRequest(BaseModel):
 	req_id: str = Field(...)
 	crw_id: Optional[str] = Field(None)
 	type: str = Field(...)
+	file_dir: str = Field("")
 	param: MinutesParam = Field(...)
 	item: list[RegexItem] = Field(default_factory=list)
 
@@ -134,37 +137,49 @@ def normalize_text(text: Optional[str]) -> str:
 
 
 def normalize_date_to_yyyymmdd(value: Optional[str]) -> Optional[str]:
-    """다양한 한국어 날짜 형식을 yyyyMMdd로 변환"""
-    if not value:
-        return None
+	"""다양한 한국어 날짜 형식을 yyyyMMdd로 변환"""
+	if not value:
+		return None
 
-    text = normalize_text(value)
-    if not text:
-        return None
+	text = normalize_text(value)
+	if not text:
+		return None
 
-    # 이미 yyyyMMdd 형식이면 그대로 반환
-    if re.fullmatch(r"\d{8}", text):
-        return text
+	# 이미 yyyyMMdd 형식이면 그대로 반환
+	if re.fullmatch(r"\d{8}", text):
+		return text
 
-    patterns = [
-        # 2026년 4월 13일, 2026년 04월 13일
-        (r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?", None),
-        # 2026-04-13, 2026-4-13
-        (r"(\d{4})-(\d{1,2})-(\d{1,2})", None),
-        # 2026/04/13
-        (r"(\d{4})/(\d{1,2})/(\d{1,2})", None),
-        # 2026.04.13, 2026. 04. 13.
-        (r"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.?", None),
-    ]
+	patterns = [
+		# 2026년 4월 13일, 2026년 04월 13일
+		r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?",
+		# 2026-04-13, 2026-4-13
+		r"(\d{4})-(\d{1,2})-(\d{1,2})",
+		# 2026/04/13
+		r"(\d{4})/(\d{1,2})/(\d{1,2})",
+		# 2026.04.13, 2026. 04. 13.
+		r"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.?",
+	]
 
-    for pattern, _ in patterns:
-        match = re.search(pattern, text)
-        if match:
-            y, m, d = match.group(1), match.group(2), match.group(3)
-            return f"{y}{int(m):02d}{int(d):02d}"
+	for pattern in patterns:
+		match = re.search(pattern, text)
+		if match:
+			y, m, d = match.group(1), match.group(2), match.group(3)
+			return f"{y}{int(m):02d}{int(d):02d}"
 
-    # 변환 실패 시 원본 반환
-    return text
+	# 변환 실패 시 원본 반환
+	return text
+
+
+def extract_year_from_date(date_str: Optional[str]) -> str:
+	"""yyyyMMdd 또는 다양한 날짜 형식에서 연도(yyyy)를 추출. 실패 시 '0000' 반환"""
+	if not date_str:
+		return "0000"
+
+	normalized = normalize_date_to_yyyymmdd(date_str)
+	if normalized and len(normalized) >= 4 and normalized[:4].isdigit():
+		return normalized[:4]
+
+	return "0000"
 
 
 def safe_select_one(element, selector: str):
@@ -381,14 +396,17 @@ def extract_uid(detail_url: Optional[str]) -> Optional[str]:
 		return None
 
 
-def extract_rasmbly_numpr_from_list_row(row_text: str) -> Optional[str]:
-	return find_first_regex(
-		row_text,
-		[
-			r"(제\s*\d+\s*대)",
-			r"(\d+\s*대)",
-		],
-	)
+def extract_rasmbly_numpr(text: str) -> Optional[str]:
+	"""텍스트에서 대수(숫자)를 추출. '제9대' -> '9', '12대' -> '12'"""
+	patterns = [
+		r"제\s*(\d+)\s*대",
+		r"(\d+)\s*대",
+	]
+	for pattern in patterns:
+		match = re.search(pattern, text)
+		if match:
+			return match.group(1)
+	return None
 
 
 def replace_query_param(url: str, param_name: str, param_value: str) -> str:
@@ -427,6 +445,41 @@ def to_model_dict(model) -> dict:
 
 def generate_crw_id() -> str:
 	return f"CRW_{uuid4().hex}"
+
+
+def build_file_save_path(
+	file_dir: str,
+	crawl_type: str,
+	crw_id: str,
+	rasmbly_numpr: Optional[str],
+	year: str,
+	mints_cn: str,
+	seq: int,
+	original_filename: str,
+) -> str:
+	"""파일 저장 경로 생성: /{file_dir}/{type}/{crw_id}/{rasmbly_numpr}/{year}/CLICK{mints_cn}_{seq}.{확장자}"""
+	ext = ""
+	if original_filename and "." in original_filename:
+		ext = original_filename.rsplit(".", 1)[-1].lower()
+
+	if ext not in FILE_EXTENSIONS:
+		ext = "bin"
+
+	safe_rasmbly = normalize_text(rasmbly_numpr) if rasmbly_numpr else "unknown"
+	safe_rasmbly = re.sub(r'[\\/:*?"<>|\s]+', "_", safe_rasmbly)
+
+	filename = f"CLICK{mints_cn}_{seq}.{ext}"
+
+	path = os.path.join(
+		file_dir,
+		crawl_type,
+		crw_id or "unknown",
+		safe_rasmbly,
+		year,
+		filename,
+	)
+
+	return path
 
 
 def build_minutes_callback_payload(
@@ -468,6 +521,7 @@ def parse_crawl_request(raw: CrawlRequest):
 			req_id=raw.req_id,
 			crw_id=raw.crw_id,
 			type=raw.type,
+			file_dir=raw.file_dir,
 			param=MinutesParam(**raw.param),
 			item=raw.item,
 		)
@@ -527,7 +581,7 @@ def extract_list_candidates(
 			"href": href or None,
 			"onclick": onclick or None,
 			"row_text": row_text,
-			"rasmbly_numpr": extract_rasmbly_numpr_from_list_row(row_text),
+			"rasmbly_numpr": extract_rasmbly_numpr(row_text),
 		})
 
 	if limit is None:
@@ -569,9 +623,10 @@ def parse_minutes_detail_by_dynamic_regex(
 			result[key] = strip_html_tags(raw_value)
 		else:
 			result[key] = normalize_text(raw_value)
-		
-		if "MTG_DE" in result and result["MTG_DE"]:
-			result["MTG_DE"] = normalize_date_to_yyyymmdd(result["MTG_DE"])
+
+	# MTG_DE 날짜 포맷 정규화
+	if "MTG_DE" in result and result["MTG_DE"]:
+		result["MTG_DE"] = normalize_date_to_yyyymmdd(result["MTG_DE"])
 
 	return result
 
@@ -982,6 +1037,9 @@ async def build_minutes_item_by_dynamic_regex(
 	href = candidate["href"]
 	onclick = candidate["onclick"]
 
+	# 1순위: 목록 row에서 대수 추출
+	rasmbly_numpr = extract_rasmbly_numpr(candidate.get("row_text", ""))
+
 	detail_url, access_method, open_type, detail_html, note = await open_detail_page(
 		list_url=list_page_url,
 		list_root_selector=request.param.list_root_selector,
@@ -995,6 +1053,14 @@ async def build_minutes_item_by_dynamic_regex(
 
 	uid = extract_uid(detail_url)
 	mints_cn = str(time.time_ns())
+
+	# 2순위: 상세 페이지에서 대수 추출
+	if not rasmbly_numpr and detail_html:
+		rasmbly_numpr = extract_rasmbly_numpr(detail_html)
+
+	# 3순위: request param fallback
+	if not rasmbly_numpr:
+		rasmbly_numpr = request.param.rasmbly_numpr
 
 	if not detail_html:
 		return MinutesItem(
@@ -1027,15 +1093,25 @@ async def build_minutes_item_by_dynamic_regex(
 				base_url=detail_url or list_page_url,
 			)
 
-			saved_path, saved_name = await download_attachment_file(
+			# MTG_DE에서 연도 추출
+			year = extract_year_from_date(parsed.get("MTG_DE"))
+
+			# 임시 경로에 다운로드, 원본 파일명 확정
+			save_path, saved_name = await download_attachment_file(
 				file_url=full_file_url,
 				file_name=extracted_file_name,
-				req_id=request.req_id,
+				file_dir=request.file_dir,
+				crawl_type=request.type,
+				crw_id=request.crw_id or "unknown",
+				rasmbly_numpr=rasmbly_numpr,
+				year=year,
+				mints_cn=mints_cn,
+				seq=1,
 				ssl_mode=request.param.ssl_mode,
 			)
 
 			parsed["ORIGINL_FILE_URL"] = full_file_url
-			parsed["MINTS_FILE_PATH"] = saved_path
+			parsed["MINTS_FILE_PATH"] = save_path
 			parsed["ORGINL_FILE_NM"] = saved_name
 
 		except Exception as exc:
@@ -1063,14 +1139,16 @@ async def build_minutes_item_by_dynamic_regex(
 async def download_attachment_file(
 	file_url: str,
 	file_name: Optional[str],
-	req_id: str,
+	file_dir: str,
+	crawl_type: str,
+	crw_id: str,
+	rasmbly_numpr: Optional[str],
+	year: str,
+	mints_cn: str,
+	seq: int,
 	ssl_mode: str,
 ) -> tuple[str, str]:
-	save_root = "./attachment"
-	os.makedirs(save_root, exist_ok=True)
-
-	final_name = normalize_text(file_name)
-
+	"""파일을 최종 경로에 다운로드하고 (save_path, original_name)을 반환"""
 	timeout = httpx.Timeout(60.0, connect=10.0)
 	headers = {"User-Agent": USER_AGENT}
 	verify_option = get_verify_options(ssl_mode)
@@ -1084,38 +1162,53 @@ async def download_attachment_file(
 		response = await client.get(file_url)
 		response.raise_for_status()
 
-		# Content-Disposition 헤더에서 파일명 추출 시도
-		if not final_name:
-			content_disposition = response.headers.get("content-disposition", "")
-			if content_disposition:
-				cd_match = re.search(
-					r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)',
-					content_disposition,
-					re.IGNORECASE,
-				)
-				if cd_match:
-					final_name = unquote(cd_match.group(1).strip())
+		# Content-Disposition 헤더에서 원본 파일명 추출
+		original_name = None
+		content_disposition = response.headers.get("content-disposition", "")
+		if content_disposition:
+			cd_match = re.search(
+				r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)',
+				content_disposition,
+				re.IGNORECASE,
+			)
+			if cd_match:
+				original_name = unquote(cd_match.group(1).strip())
 
-		# Content-Disposition에도 없으면 URL path에서 추출
-		if not final_name:
-			path_name = urlparse(file_url).path.split("/")[-1]
-			final_name = unquote(path_name) if path_name else ""
+		resolved_name = normalize_text(original_name) or normalize_text(file_name) or "unknown.bin"
 
-		# 그래도 없으면 req_id로 fallback
-		if not final_name:
-			final_name = f"{req_id}.bin"
+		# 확정된 원본 파일명으로 저장 경로 생성
+		save_path = build_file_save_path(
+			file_dir=file_dir,
+			crawl_type=crawl_type,
+			crw_id=crw_id,
+			rasmbly_numpr=rasmbly_numpr,
+			year=year,
+			mints_cn=mints_cn,
+			seq=seq,
+			original_filename=resolved_name,
+		)
 
-		final_name = re.sub(r'[\\/:*?"<>|]+', "_", final_name)
-		save_path = save_root + "/" + final_name
+		os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-		# 이미 파일 존재하면 다운로드 안 하고 바로 반환
 		if os.path.exists(save_path):
-			return save_path, final_name
+			return save_path, resolved_name
 
 		with open(save_path, "wb") as f:
 			f.write(response.content)
 
-	return save_path, final_name
+	return save_path, resolved_name
+
+
+def _resolve_original_filename(file_url: str, content_disposition_name: Optional[str]) -> str:
+	"""원본 파일명 결정: Content-Disposition > URL path > fallback"""
+	if content_disposition_name:
+		return normalize_text(content_disposition_name)
+
+	path_name = urlparse(file_url).path.split("/")[-1]
+	if path_name:
+		return normalize_text(unquote(path_name))
+
+	return "unknown"
 
 
 async def run_minutes_all_and_callback(request: RegexCrawlRequest) -> None:
