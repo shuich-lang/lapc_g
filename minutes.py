@@ -133,6 +133,40 @@ def normalize_text(text: Optional[str]) -> str:
 	return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def normalize_date_to_yyyymmdd(value: Optional[str]) -> Optional[str]:
+    """다양한 한국어 날짜 형식을 yyyyMMdd로 변환"""
+    if not value:
+        return None
+
+    text = normalize_text(value)
+    if not text:
+        return None
+
+    # 이미 yyyyMMdd 형식이면 그대로 반환
+    if re.fullmatch(r"\d{8}", text):
+        return text
+
+    patterns = [
+        # 2026년 4월 13일, 2026년 04월 13일
+        (r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?", None),
+        # 2026-04-13, 2026-4-13
+        (r"(\d{4})-(\d{1,2})-(\d{1,2})", None),
+        # 2026/04/13
+        (r"(\d{4})/(\d{1,2})/(\d{1,2})", None),
+        # 2026.04.13, 2026. 04. 13.
+        (r"(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.?", None),
+    ]
+
+    for pattern, _ in patterns:
+        match = re.search(pattern, text)
+        if match:
+            y, m, d = match.group(1), match.group(2), match.group(3)
+            return f"{y}{int(m):02d}{int(d):02d}"
+
+    # 변환 실패 시 원본 반환
+    return text
+
+
 def safe_select_one(element, selector: str):
 	try:
 		return element.select_one(selector)
@@ -535,6 +569,9 @@ def parse_minutes_detail_by_dynamic_regex(
 			result[key] = strip_html_tags(raw_value)
 		else:
 			result[key] = normalize_text(raw_value)
+		
+		if "MTG_DE" in result and result["MTG_DE"]:
+			result["MTG_DE"] = normalize_date_to_yyyymmdd(result["MTG_DE"])
 
 	return result
 
