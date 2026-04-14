@@ -1,7 +1,9 @@
+import json
+
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError, BaseModel
-import json
+
 
 from bill import (
     app as bill_app,
@@ -34,7 +36,8 @@ router = APIRouter()
 class CrawlStatusRequest(BaseModel):
     req_id: str
 
-# ======= Background Task Runners =======
+router.include_router(bill_app.router, tags=["Bill"])
+#router.include_router(minutes_app.router, tags=["Minutes"])
 
 async def run_bill_job(req_obj):
     try:
@@ -127,6 +130,7 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
         "req_id": json_data.get("req_id"),
         "type": req_type,
         "crw_id": json_data.get("crw_id"),
+        "file_dir": json_data.get("file_dir"),
         "ok": True,
         "message": f"[{req_type}] 수집 작업을 시작했습니다."
     }
