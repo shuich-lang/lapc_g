@@ -39,8 +39,8 @@ USER_AGENT = (
 )
 
 # CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"		# 실제 CMS 서버 (도커 외부에서 접근용)
-# CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
-CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
+CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
+# CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
 # CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
@@ -985,7 +985,19 @@ async def resolve_detail_by_playwright(
 						continue
 
 					if frame_html and len(frame_html) > 200:
-						detail_url = frame.ur
+						detail_url = frame.url or page.url
+						await browser.close()
+						return detail_url, "playwright-click", "iframe", frame_html, None
+
+			await browser.close()
+			print(f"[PLAYWRIGHT] 모든 감지 실패: popup/same-page/iframe 변화 없음")
+			return None, "playwright-click", "unknown", None, "클릭은 수행했지만 popup/same-page/iframe 변화를 확인하지 못했습니다."
+
+	except Exception as exc:
+		print(f"[PLAYWRIGHT] 예외 발생: {type(exc).__name__} / {str(exc)}")
+		return None, f"playwright-error:{type(exc).__name__}", None, None, (
+			f"Playwright 예외 발생: {type(exc).__name__} / {str(exc)}\n{traceback.format_exc()}"
+		)
 
 
 async def open_detail_page(
