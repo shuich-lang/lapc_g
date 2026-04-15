@@ -895,6 +895,7 @@ async def resolve_detail_by_playwright(
 			page = await context.new_page()
 
 			await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
+			print(f"[PLAYWRIGHT] 목록 페이지 로드 완료: {page.url}")
 
 			root = page.locator(list_root_selector).first
 			if await root.count() == 0:
@@ -903,6 +904,8 @@ async def resolve_detail_by_playwright(
 
 			items = root.locator(item_selector)
 			item_count = await items.count()
+			print(f"[PLAYWRIGHT] item 수: {item_count}, rank_index: {rank_index}")
+
 			if item_count == 0:
 				await browser.close()
 				return None, "playwright-no-item", None, None, "item_selector에 해당하는 item을 찾지 못했습니다."
@@ -918,22 +921,28 @@ async def resolve_detail_by_playwright(
 			else:
 				target = item.locator(target_selector).first
 
-			if await target.count() == 0:
+			target_count = await target.count()
+			print(f"[PLAYWRIGHT] target 존재 여부: {target_count > 0}, selector: {target_selector}")
+
+			if target_count == 0:
 				await browser.close()
 				return None, "playwright-no-target", None, None, "target_selector에 해당하는 target을 찾지 못했습니다."
 
 			original_url = page.url
+
+			print(f"[PLAYWRIGHT] 클릭 시도: rank_index={rank_index}")
 
 			try:
 				async with page.expect_popup(timeout=5000) as popup_info:
 					await target.click()
 
 				popup = await popup_info.value
+				print(f"[PLAYWRIGHT] 팝업 감지 성공: {popup.url}")
 
 				try:
 					await popup.wait_for_load_state("networkidle", timeout=10000)
 				except PlaywrightTimeoutError:
-					pass
+					print(f"[PLAYWRIGHT] 팝업 networkidle 타임아웃 (계속 진행)")
 
 				detail_html = None
 				for _ in range(3):
@@ -945,13 +954,14 @@ async def resolve_detail_by_playwright(
 
 				detail_url = popup.url
 				detail_html = await popup.content()
+				print(f"[PLAYWRIGHT] 팝업 HTML 취득 성공: {len(detail_html)} bytes")
 
 				await popup.close()
 				await browser.close()
 				return detail_url, "playwright-click", "popup", detail_html, None
 
 			except PlaywrightTimeoutError:
-				pass
+				print(f"[PLAYWRIGHT] 팝업 감지 실패 (timeout), same-page/iframe 확인 진행")
 
 			try:
 				await page.wait_for_load_state("networkidle", timeout=5000)
@@ -961,10 +971,12 @@ async def resolve_detail_by_playwright(
 			if page.url and page.url != original_url:
 				detail_url = page.url
 				detail_html = await page.content()
+				print(f"[PLAYWRIGHT] same-page 이동 감지: {detail_url}")
 				await browser.close()
 				return detail_url, "playwright-click", "same_page", detail_html, None
 
 			frames = page.frames
+			print(f"[PLAYWRIGHT] 프레임 수: {len(frames)}")
 			if len(frames) > 1:
 				for frame in frames[1:]:
 					try:
@@ -973,17 +985,7 @@ async def resolve_detail_by_playwright(
 						continue
 
 					if frame_html and len(frame_html) > 200:
-						detail_url = frame.url or page.url
-						await browser.close()
-						return detail_url, "playwright-click", "iframe", frame_html, None
-
-			await browser.close()
-			return None, "playwright-click", "unknown", None, "클릭은 수행했지만 popup/same-page/iframe 변화를 확인하지 못했습니다."
-
-	except Exception as exc:
-		return None, f"playwright-error:{type(exc).__name__}", None, None, (
-			f"Playwright 예외 발생: {type(exc).__name__} / {str(exc)}\n{traceback.format_exc()}"
-		)
+						detail_url = frame.ur
 
 
 async def open_detail_page(
