@@ -368,14 +368,18 @@ def extract_uid(detail_url: Optional[str]) -> Optional[str]:
 		parsed = urlparse(detail_url)
 
 		query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-		preferred_keys = ["uid", "key", "MINTS_SN", "minutesSn", "minutes_sn", "id", "no", "seq"]
+		preferred_keys = ["uid", "key", "id", "seq"]
+		exclude_keys = {"page", "pageNo", "pageNum", "pageIndex", "currentPage",
+						"search", "keyword", "search_code", "pageCurNo"}
 
 		for preferred_key in preferred_keys:
 			for key, value in query_pairs:
 				if key == preferred_key and normalize_text(value):
 					return normalize_text(value)
 
-		for _, value in query_pairs:
+		for key, value in query_pairs:
+			if key in exclude_keys:
+				continue
 			if normalize_text(value):
 				return normalize_text(value)
 
