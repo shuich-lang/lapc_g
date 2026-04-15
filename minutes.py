@@ -469,7 +469,7 @@ def build_file_save_path(
 	safe_rasmbly = normalize_text(rasmbly_numpr) if rasmbly_numpr else "unknown"
 	safe_rasmbly = re.sub(r'[\\/:*?"<>|\s]+', "_", safe_rasmbly)
 
-	filename = f"CLICK{mints_cn}_{seq}.{ext}"
+	filename = f"{mints_cn}_{seq}.{ext}"
 
 	path = os.path.join(
 		file_dir,
