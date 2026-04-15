@@ -41,6 +41,8 @@ _P_SESN_ONLY     = re.compile(r'제\s*(\d+)\s*회')                        # "�
 _P_DIGIT_ONLY    = re.compile(r'^\d+$')                                  # "8", "266"
 _P_SLASH_NUMPR_SESN = re.compile(r'(\d+)\s*대\s*/\s*제\s*(\d+)\s*회')     # "9대 / 제315회 임시회"
 _P_HYPHEN_NUMPR_SESN = re.compile(r'(\d+)\s*대\s*[-–—]\s*(\d+)\s*회')  # "9대-287회"
+# 날짜 형식
+_DATE_PATTERN = re.compile(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})')
 
 # 상세 파라미터
 class ScrapeParam(BaseModel):
@@ -196,6 +198,14 @@ def build_save_path(req: "ScrapeRequest", year: str, bi_cn: str, seq: int, ext: 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
 
+def _normalize_date(value: str) -> str:
+    """날짜 형식 정규화: 2024.01.01 → 20240101"""
+    m = _DATE_PATTERN.search(value)
+    if m:
+        y, mo, d = m.group(1), m.group(2).zfill(2), m.group(3).zfill(2)
+        return f"{y}{mo}{d}"
+    return value
+
 # ── 표준키 → 파서 함수 매핑 테이블 ────────────────────────
 # 새 파싱 규칙: 이 딕셔너리에만 추가
 VALUE_PARSERS: Dict[str, callable] = {
@@ -210,8 +220,12 @@ def parse_value(mapped_key: str, raw_value: str) -> Dict[str, str]:
     parser = VALUE_PARSERS.get(mapped_key)
     if parser:
         result = parser(raw_value)
-        # 파서가 빈 딕셔너리를 반환하면(파싱 실패) 원본 보존
         return result if result else {mapped_key: raw_value}
+    
+    # _DE로 끝나는 키는 날짜 정규화
+    if mapped_key.endswith("_DE"):
+        return {mapped_key: _normalize_date(raw_value)}
+    
     return {mapped_key: raw_value}
     
 # --- 브라우저 / 페이지네이션 헬퍼 ---
