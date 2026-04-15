@@ -38,10 +38,11 @@ USER_AGENT = (
 	"Chrome/122.0.0.0 Safari/537.36"
 )
 
-# CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"		# 실제 CMS 서버 (도커 외부에서 접근용)
-CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
+# CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"		# 개발서버 cms (도커 외부에서 접근용)
+CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 개발서버 cms (도커 내부에서 접근용)
 # CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
 # CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
+# CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"		# 국회 cms
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
 
