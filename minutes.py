@@ -606,6 +606,10 @@ def parse_minutes_detail_by_dynamic_regex(
 		if not key:
 			continue
 
+		# 정규식이 비어있으면 건너뜀 (CMS에서 전체 컬럼을 보내는 경우 대응)
+		if not item.regex or all(not normalize_text(r) for r in item.regex):
+			continue
+
 		# regex 목록 중 "list_title" 예약어 체크
 		if len(item.regex) == 1 and normalize_text(item.regex[0]).lower() == "list_title":
 			value = normalize_text(list_title)
@@ -718,7 +722,7 @@ def extract_file_info_from_reserved_value(
 	raw_value = normalize_text(raw_file_value)
 
 	if not raw_value:
-		raise ValueError("ORIGINL_FILE_URL 값이 비어 있습니다.")
+		raise ValueError("ORGINL_FILE_URL 값이 비어 있습니다.")
 
 	# <a ...>...</a> 전체가 넘어온 경우
 	if "<a" in raw_value.lower():
@@ -726,13 +730,13 @@ def extract_file_info_from_reserved_value(
 		a_tag = soup.find("a")
 
 		if not a_tag:
-			raise ValueError("ORIGINL_FILE_URL에서 a 태그를 찾지 못했습니다.")
+			raise ValueError("ORGINL_FILE_URL에서 a 태그를 찾지 못했습니다.")
 
 		href = normalize_text(a_tag.get("href"))
 		file_name = normalize_text(a_tag.get_text(" ", strip=True))
 
 		if not href:
-			raise ValueError("ORIGINL_FILE_URL a 태그에 href가 없습니다.")
+			raise ValueError("ORGINL_FILE_URL a 태그에 href가 없습니다.")
 
 		return urljoin(base_url, href), (file_name or None)
 
@@ -1084,7 +1088,7 @@ async def build_minutes_item_by_dynamic_regex(
 		list_title=title,
 	)
 
-	file_value = parsed.pop("ORIGINL_FILE_URL", None)
+	file_value = parsed.pop("ORGINL_FILE_URL", None)
 
 	if file_value:
 		try:
@@ -1119,6 +1123,8 @@ async def build_minutes_item_by_dynamic_regex(
 			parsed["MINTS_FILE_PATH"] = None
 			parsed["ORGINL_FILE_NM"] = None
 			note = f"{note} / 첨부파일 다운로드 실패: {type(exc).__name__}" if note else f"첨부파일 다운로드 실패: {type(exc).__name__}"
+		
+	parsed["RASMBLY_NUMPR"] = rasmbly_numpr
 
 	return MinutesItem(
 		rank=final_rank,
