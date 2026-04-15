@@ -66,6 +66,7 @@ class RegexItem(BaseModel):
 	regex: list[str] = Field(..., description="상세 HTML에서 추출할 정규식")
 	xpath: list[str] = Field(None, description="(미구현) XPath 추출용 필드 - 향후 지원 예정")
 	removeTags: str = Field(..., description="HTML 태그 제거 여부: Y | N")
+	value: Optional[str] = Field(None, description="고정값. regex 있으면 무시하고 그냥 value에 있는거 넣어줄거임")
 
 
 class CrawlRequest(BaseModel):
@@ -604,6 +605,11 @@ def parse_minutes_detail_by_dynamic_regex(
 	for item in request.item:
 		key = normalize_text(item.col)
 		if not key:
+			continue
+
+		# value가 지정되어 있으면 고정값으로 사용 (regex 무시)
+		if item.value is not None and normalize_text(item.value):
+			result[key] = normalize_text(item.value)
 			continue
 
 		# 정규식이 비어있으면 건너뜀 (CMS에서 전체 컬럼을 보내는 경우 대응)
