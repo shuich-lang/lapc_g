@@ -39,8 +39,8 @@ USER_AGENT = (
 )
 
 # CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"		# 실제 CMS 서버 (도커 외부에서 접근용)
-CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
-# CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
+# CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
+CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
 # CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
@@ -1155,6 +1155,8 @@ async def download_attachment_file(
 	ssl_mode: str,
 ) -> tuple[str, str]:
 	"""파일을 최종 경로에 다운로드하고 (save_path, original_name)을 반환"""
+	print(f"[FILE] 다운로드 시작: {file_url}")
+
 	timeout = httpx.Timeout(60.0, connect=10.0)
 	headers = {"User-Agent": USER_AGENT}
 	verify_option = get_verify_options(ssl_mode)
@@ -1168,7 +1170,6 @@ async def download_attachment_file(
 		response = await client.get(file_url)
 		response.raise_for_status()
 
-		# Content-Disposition 헤더에서 원본 파일명 추출
 		original_name = None
 		content_disposition = response.headers.get("content-disposition", "")
 		if content_disposition:
@@ -1182,7 +1183,6 @@ async def download_attachment_file(
 
 		resolved_name = normalize_text(original_name) or normalize_text(file_name) or "unknown.bin"
 
-		# 확정된 원본 파일명으로 저장 경로 생성
 		save_path = build_file_save_path(
 			file_dir=file_dir,
 			crawl_type=crawl_type,
@@ -1197,10 +1197,13 @@ async def download_attachment_file(
 		os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
 		if os.path.exists(save_path):
+			print(f"[FILE] 이미 존재하는 파일 스킵: {save_path}")
 			return save_path, resolved_name
 
 		with open(save_path, "wb") as f:
 			f.write(response.content)
+
+		print(f"[FILE] 다운로드 성공: {resolved_name} -> {save_path} ({len(response.content)} bytes)")
 
 	return save_path, resolved_name
 
