@@ -206,6 +206,31 @@ def _normalize_date(value: str) -> str:
         return f"{y}{mo}{d}"
     return value
 
+def _build_result(view_data: list, log: list, interrupted: bool, error: str = "") -> dict:
+    """수집 결과 상태 자동 판별"""
+    has_timeout = any("Timeout" in (e.get("error") or "") for e in log)
+    has_error   = any(e.get("error") for e in log)
+    data_count  = len(view_data)
+
+    if error:
+        status, code, message = "FAILED", "500", f"수집 실패: {error}"
+    elif data_count == 0 and has_timeout:
+        status, code, message = "TIMEOUT", "408", "타임아웃으로 수집 불가"
+    elif data_count == 0:
+        status, code, message = "EMPTY", "204", "수집 결과 없음"
+    elif interrupted or has_timeout or has_error:
+        status, code, message = "PARTIAL", "206", "일부 수집 완료 (오류/중단 포함)"
+    else:
+        status, code, message = "SUCCESS", "200", "수집 완료"
+
+    return {
+        "status":      status,
+        "code":        code,
+        "message":     message,
+        "dataCount":   data_count,
+        "interrupted": interrupted,
+    }
+
 # ── 표준키 → 파서 함수 매핑 테이블 ────────────────────────
 # 새 파싱 규칙: 이 딕셔너리에만 추가
 VALUE_PARSERS: Dict[str, callable] = {
@@ -240,11 +265,14 @@ async def _setup_browser(pw):
 async def _collect_pages(page, list_url, numpr, list_class, vid_param,
                          max_pages, paging_sel, next_btn_sel, end_btn_sel, extractor, stop_check, search_form_selector, numpr_select_selector, search_btn_selector):
     """공통 리스트 수집 루프 (필터 + 페이지네이션)"""
+    collect_errors = []  # ← 추가
+
     await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
     
     if numpr and numpr.strip():
         # 검색 후 list_class가 나타날 때까지 기다리도록 인자 추가
-        await UniversalCrawler.apply_filter_and_search(page, numpr.strip(), list_class, search_form_selector, numpr_select_selector, search_btn_selector)
+        filter_errors = await UniversalCrawler.apply_filter_and_search(page, numpr.strip(), list_class, search_form_selector, numpr_select_selector, search_btn_selector)
+        collect_errors.extend(filter_errors)
     else:
         # 검색 안 할 때도 리스트는 기다려야 함
         await page.wait_for_selector(normalize_selector(list_class), timeout=10000)
@@ -262,10 +290,19 @@ async def _collect_pages(page, list_url, numpr, list_class, vid_param,
         try:
             data.extend(await extractor(page, list_class, vid_param))
         except Exception as e:
-            print(f"[!] {cp}p 실패 (건너뜀): {e}", flush=True)
+            msg = str(e)
+            # ← 어떤 셀렉터에서 실패했는지 파싱
+            sel_match = re.search(r'locator\("([^"]+)"\)', msg)
+            sel_hint = f" [셀렉터: {sel_match.group(1)}]" if sel_match else ""
+            print(f"[!] {cp}p 실패 (건너뜀): {msg}", flush=True)
+            collect_errors.append({
+                "step": f"리스트수집_{cp}p",
+                "selector": sel_match.group(1) if sel_match else list_class,
+                "error": msg[:300]
+            })
         if cp < target and not await UniversalCrawler.go_to_page(page, cp + 1, paging_sel, next_btn_sel):
             await _try_url_fallback(page, cp + 1)
-    return data
+    return data, collect_errors
 
 async def _try_url_fallback(page, next_page):
     """페이지 이동 실패 시 URL 파라미터 직접 치환"""
@@ -292,6 +329,7 @@ class UniversalCrawler:
         btn_sel: str
     ):
         print(f"[*] 필터 적용 시작 (대수:{numpr})", flush=True)
+        filter_errors = []
         try:
             # 1. 특정된 대수 셀렉터로 선택
             # 사용자가 준 select_sel (예: select#th_sch) 내에서 옵션 탐색
@@ -343,19 +381,44 @@ class UniversalCrawler:
                             await btn.click()
 
                 print("[+] 검색 버튼 클릭 성공", flush=True)
-            except:
-                # 버튼 클릭 실패 시 폼 직접 제출 (form_sel 활용)
+            except Exception as e:
+                msg = str(e)
+                sel_match = re.search(r'locator\("([^"]+)"\)', msg)
+                filter_errors.append({
+                    "step": "필터_버튼클릭",
+                    "selector": btn_sel,
+                    "error": msg[:300]
+                })
                 print(f"[!] 버튼 클릭 실패, 폼({form_sel}) 직접 제출 시도...", flush=True)
                 await page.evaluate(f"document.querySelector('{form_sel}')?.submit()")
                 await page.wait_for_load_state("networkidle")
 
             # 3. 결과 로딩 확인
             if list_class:
-                await page.wait_for_selector(normalize_selector(list_class), timeout=10000)
-                print("[+] 리스트 로드 완료", flush=True)
+                try:
+                    await page.wait_for_selector(normalize_selector(list_class), timeout=10000)
+                    print("[+] 리스트 로드 완료", flush=True)
+                except Exception as e:
+                    msg = str(e)
+                    sel_match = re.search(r'locator\("([^"]+)"\)', msg)
+                    filter_errors.append({
+                        "step": "필터_리스트로드",
+                        "selector": sel_match.group(1) if sel_match else list_class,
+                        "error": msg[:300]
+                    })
+                    print(f"[!] 리스트 로드 실패: {msg}", flush=True)
 
         except Exception as e:
+            msg = str(e)
+            sel_match = re.search(r'locator\("([^"]+)"\)', msg)
+            filter_errors.append({
+                "step": "필터_전체오류",
+                "selector": sel_match.group(1) if sel_match else "",
+                "error": msg[:300]
+            })
             print(f"[!] 필터 적용 중 오류: {e}", flush=True)
+
+        return filter_errors
 
     @staticmethod
     def _extract_view_id(href: str, onclick: str, row_html: str, view_id_param: str) -> Optional[str]:
@@ -576,7 +639,7 @@ class UniversalCrawler:
                 continue
 
             if not result.get("BI_SJ"): # 평창군의회,부산시의회,서울특별시의회,종로구의회 등 한정 기능 (제목 하드 수집)
-                for sel in ("table[summary='제목'] td", "div.ViewBoxHead", "th.vision2Tit", "p.title", "h1.title", "h2.title", "div.view_top h2", ".view_title", ".board_title", "#title", "thead th[colspan]", "div.bbs_vtop h4"):
+                for sel in ("table[summary='제목'] td", "div.ViewBoxHead", "th.vision2Tit", "h4.taC", "p.title", "h1.title", "h2.title", "div.view_top h2", ".view_title", ".board_title", "#title", "thead th[colspan]", "div.bbs_vtop h4"):
                     try:
                         el = await page.query_selector(sel)
                         if el:
@@ -780,6 +843,7 @@ async def execute_view_scraping(req: ScrapeRequest):
     domain = extract_domain(p.list_url)
     list_data, view_data = [], []
     filepath = None
+    error_logs = []
     
     async with async_playwright() as playwright:
         browser, page = await _setup_browser(playwright)
@@ -787,12 +851,22 @@ async def execute_view_scraping(req: ScrapeRequest):
             # 1단계: 리스트 수집
             print(f"\n{'='*60}", flush=True)
             print(f"[*] [1단계] 리스트 수집 시작: {p.list_url}", flush=True)
-            list_data = await _collect_pages(
+            list_data, collect_errors = await _collect_pages(
                 page, p.list_url, p.rasmbly_numpr, p.list_class, p.view_id_param,
                 p.max_pages, p.paging_selector, p.next_btn_selector, p.end_btn_selector,
                 UniversalCrawler.extract_list_page, lambda: app.state.stop_scraping,
                 p.search_form_selector, p.numpr_select_selector, p.search_btn_selector,
             )
+            error_logs.extend(collect_errors)
+
+            # ← 리스트 수집 실패 감지
+            if not list_data:
+                error_logs.append({
+                    "step": "1단계_리스트수집",
+                    "url": p.list_url,
+                    "selector": p.list_class,
+                    "error": "리스트 수집 결과 0건"
+                })
 
             # 2단계: 상세 뷰 수집 루프
             total = len(list_data)
@@ -829,19 +903,43 @@ async def execute_view_scraping(req: ScrapeRequest):
                     print(f"    [!] ID: {vid} 수집 실패: {e}", flush=True)
                     view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
 
-            # --- 루프 종료 후 공통 처리 (정상 종료 또는 중단 시 모두 실행) ---
-            if view_data:
-                filepath = save_to_json(view_data, domain, "view_all")
-                print(f"[OK] 데이터 저장 완료 ({len(view_data)}건): {filepath}", flush=True)
+                    error_logs.append({  # ← 추가
+                        "step": "2단계_상세수집",
+                        "view_id": vid,
+                        "url": target_url,
+                        "error": str(e)
+                    })
 
-                # CMS(Java) API 전송 (중단 시점까지의 데이터 전송)
+            result_block = _build_result(view_data, error_logs, app.state.stop_scraping)
+
+            full_payload = {
+                    "reqId":   req.req_id,
+                    "type":    req.type,
+                    "crwId":   req.crw_id,
+                    "fileDir": req.file_dir,
+                    "result":  result_block,
+                    "data":    view_data,
+                    "log":     error_logs  # ← 에러 로그 포함
+                }
+            
+            # --- 루프 종료 후 공통 처리 (정상 종료 또는 중단 시 모두 실행) ---
+            if view_data or error_logs:
+                if view_data:
+                    filepath = save_to_json(full_payload, domain, req.type)
+                    print(f"[OK] 데이터 저장 완료 ({len(view_data)}건): {filepath}", flush=True)
+                else:
+                    filepath = save_to_json(full_payload, domain, req.type+"_error")
+                    print(f"[!] 수집 데이터 없음, 에러 로그 {len(error_logs)}건 저장: {filepath}", flush=True)
+
                 print(f"[*] [3단계] 데이터 전송 시도...", flush=True)
                 await send_to_insert_api(
                     req_id=req.req_id,
                     type_val=req.type,
                     crw_id=req.crw_id,
                     file_dir=req.file_dir,
-                    data_list=view_data
+                    result=result_block,
+                    data_list=view_data,
+                    error_logs=error_logs  # ← 추가
                 )
             else:
                 print(f"[!] 수집된 데이터가 없어 전송을 생략합니다.", flush=True)
@@ -863,7 +961,7 @@ async def execute_view_scraping(req: ScrapeRequest):
         finally:
             await browser.close()
 
-async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, file_dir: str, data_list: list):
+async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, file_dir: str, result: dict, data_list: list, error_logs: list = None):
     target_url = "http://10.201.38.157:8080/insert_api.do"
     # target_url = "http://211.219.26.15:18120/insert_api.do"
     
@@ -872,7 +970,9 @@ async def send_to_insert_api(req_id: str, type_val: str, crw_id: str, file_dir: 
         "type": type_val,
         "crwId": crw_id,
         "fileDir": file_dir,
-        "data": data_list
+        "result": result,
+        "data": data_list,
+        "log": error_logs or []
     }
 
     print(f"\n[*] [3단계] 데이터 전송 시도 (JSON 방식)", flush=True)
