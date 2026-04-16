@@ -33,6 +33,7 @@ FIELD_MAP = {
     "심의안건": "BI_FILE_NM", "발의(제출)안": "BI_FILE_NM", "본문내용_첨부파일": "BI_FILE_NM",
     "제안안(원안)": "BI_FILE_NM", "의안": "BI_FILE_NM", "관련자료": "BI_FILE_NM", "회의록보기": "BI_FILE_NM", "보고서": "BI_FILE_NM",
     "첨부파일링크": "BI_FILE_URL",
+    "소관위 주요 내용": "CMIT_UPDT_OUTLINE",
     "접수일": "PLNMT_FRWRD_DE", "접수일자": "PLNMT_FRWRD_DE", "심사보고접수일": "PLNMT_FRWRD_DE", "심사보고회접수일": "PLNMT_FRWRD_DE",
     "회부일": "PLNMT_FRWRD_DE", "회부일자": "PLNMT_FRWRD_DE", "심사보고서접수일": "PLNMT_FRWRD_DE", "재의일": "PLNMT_FRWRD_DE",
     "보고일": "PLNMT_REPORT_DE", "보고일자": "PLNMT_REPORT_DE",
@@ -55,7 +56,7 @@ _CMIT_FIELDS = {
     "의결일": "CMIT_PROCESS_DE", "의결일자": "CMIT_PROCESS_DE", "처리일": "CMIT_PROCESS_DE",
     "처리 결과": "CMIT_RESULT", "처리결과": "CMIT_RESULT", "본회의 처리사항": "CMIT_RESULT",
     "심사 결과": "CMIT_RESULT", "심사결과": "CMIT_RESULT", "결과": "CMIT_RESULT",
-    "비고": "CMIT_UPDT_OUTLINE",
+    "비고": "CMIT_UPDT_OUTLINE", "소관위 주요 내용": "CMIT_UPDT_OUTLINE",
     "관련 회의록": "CMIT_RELATED_MEETING",
     "소관위원회 관련 회의록": "CMIT_RELATED_MEETING",
 }
