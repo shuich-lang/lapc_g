@@ -103,18 +103,18 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
 
     try:
         # 3. 타입에 따른 모델 검증 분기
-        if req_type == "bill":
+        if "bill" in req_type:
             req_obj = ScrapeRequest(**json_data)  # 여기서 Pydantic 검증 발생
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_bill_job, req_obj)
             
-        elif req_type == "minutes":
+        elif "minutes" in req_type:
             raw = CrawlRequest(**json_data)
             req_obj = parse_crawl_request(raw)
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_minutes_job, req_obj)
         
-        elif req_type == "free5min":
+        elif "free5min" in req_type:
             req_obj = SpchCrawlRequest(**json_data)
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_spch_job, req_obj)
