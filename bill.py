@@ -150,6 +150,24 @@ def _parse_bi_no(value: str) -> Dict[str, str]:
             "BI_NO":        m.group(1).strip(),
             "RASMBLY_SESN": _to_int_str(m.group(2))
         }
+    
+    # 추가: "531 (9대-295회)" / "531 (9대/295회)" / "531 (9대 295회)"
+    m = re.match(r'^(.+?)\s*[\(\（](\d+)\s*대\s*[-/\s]\s*(\d+)\s*회[\)\）]', v)
+    if m:
+        return {
+            "BI_NO":         m.group(1).strip(),
+            "RASMBLY_NUMPR": m.group(2),
+            "RASMBLY_SESN":  m.group(3)
+        }
+
+    # 추가: "531 (제9대 제295회)"
+    m = re.match(r'^(.+?)\s*[\(\（]제\s*(\d+)\s*대.*?제\s*(\d+)\s*회[\)\）]', v)
+    if m:
+        return {
+            "BI_NO":         m.group(1).strip(),
+            "RASMBLY_NUMPR": m.group(2),
+            "RASMBLY_SESN":  m.group(3)
+        }
     return {"BI_NO": v}
 
 
@@ -639,7 +657,7 @@ class UniversalCrawler:
                 continue
 
             if not result.get("BI_SJ"): # 평창군의회,부산시의회,서울특별시의회,종로구의회 등 한정 기능 (제목 하드 수집)
-                for sel in ("table[summary='제목'] td", "div.ViewBoxHead", "th.vision2Tit", "h4.taC", "p.title", "h1.title", "h2.title", "div.view_top h2", ".view_title", ".board_title", "#title", "thead th[colspan]", "div.bbs_vtop h4"):
+                for sel in ("table[summary='제목'] td", "div.ViewBoxHead", "th.vision2Tit", "h4.taC", "p.title", "h1.title", "h2.title", "div.view_top h2", ".view_title", ".board_title", "#title", "thead th[colspan]", "div.bbs_vtop h4", "th.text-left.pl-2"):
                     try:
                         el = await page.query_selector(sel)
                         if el:
