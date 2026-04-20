@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator
  
 # ── 공통 상수 ─────────────────────────────────────────────────────────────────
 DOWNLOAD_DIR        = "download"
-ATTACH_DIR          = "attachment"
 BLOCKED_RESOURCES   = {"image", "stylesheet", "media", "font"}
 PAGE_PARAM_PATTERN  = r'([?&](?:page|pageIndex|p|page_no|pageno|cPage|pageNum|page_id|cp))=(\d+)'
 VIEW_ID_AUTO_PARAMS = r"[?&](uid|idx|code|no|seq|id|nttId|uuid|bbsSeq|ntNo|articleSeq|list_no|postId|num|docId)=([^&]+)"
@@ -64,7 +63,7 @@ class PolicyParam(BaseModel):
  
 class PolicyRequest(BaseModel):
     req_id:   str         = Field(..., min_length=1, description="요청 식별자")
-    type:     str         = Field(..., min_length=1, description="수집 타입 (policy)")
+    type:     str         = Field(..., min_length=1, description="수집 타입 (policyinfo)")
     crw_id:   str         = Field(..., min_length=1, description="크롤러 식별자")
     file_dir: str         = Field(...,               description="파일 저장 디렉토리 루트")
     param:    PolicyParam = Field(...,               description="크롤링 상세 설정")
@@ -344,7 +343,6 @@ class PolicyCrawler:
         req: "PolicyRequest", outbbs_cn: str, year: str,
         download: bool = True,
     ) -> list:
-        os.makedirs(ATTACH_DIR, exist_ok=True)
         attachments = []
         seq = 0
  
@@ -391,13 +389,12 @@ class PolicyCrawler:
                 seq += 1
  
             attachments.append({
-                "CONTS_SEQ":   f"CLIKC{outbbs_cn}",
                 "ORG_FILE_NM": original_name,
                 "DOWNPATH":    down_path,
                 "DOWNURL":     url_val,
                 "FILE_TYPE":   _file_type(ext),
                 "CUD_CODE":    "C",
-                "REG_DATE":    datetime.now().strftime("%Y%m%d%H%M%S"),
+                "REG_DATE":    datetime.now().strftime("%Y-%m-%d"),
             })
  
         return attachments
@@ -414,11 +411,10 @@ class PolicyCrawler:
         list_url:   str = "",
     ) -> Tuple[dict, list]:
         p         = req.param
-        conts_seq = f"CLIKC{outbbs_cn}"
         year      = datetime.now().strftime("%Y")
  
         contents = {
-            "OUTBBS_CN":     conts_seq,
+            "OUTBBS_CN":     f"CLIKC{outbbs_cn}",
             "TITLE":         list_title,
             "CONTENT":       "",
             "WRITER":        "",
@@ -437,7 +433,7 @@ class PolicyCrawler:
             "SITENM":        p.site_nm,
             "SEEDNM":        p.seed_nm,
             "CUD_CODE":      "C",
-            "REG_DATE":      datetime.now().strftime("%Y%m%d%H%M%S"),
+            "REG_DATE":      datetime.now().strftime("%Y-%m-%d"),
             "FILENAME":      "",
             "FILEPATH":      "",
         }
@@ -606,11 +602,9 @@ class PolicyCrawler:
             try:
                 el = await page.query_selector(content_sel)
                 if el:
-                    t = clean_text(await el.inner_text())
-                    if len(t) > 30:
-                        contents["CONTENT"] = t
-                        print(f"[+] 본문 수집: {content_sel} ({len(t)}자)", flush=True)
-                        return
+                    html  = await el.inner_html()           # ← <p>, &nbsp; 등 원본 HTML 그대로
+                    plain = clean_text(await el.inner_text()) # 길이 판단용으로만 사용 (빈 컨테이너 제외)
+                    contents["CONTENT"] = html
             except: pass
  
     # ── (7-4) 첨부파일 fallback ───────────────────────────────────────────────
@@ -717,7 +711,6 @@ async def execute_policy_scraping(req: PolicyRequest):
     p             = req.param
     domain        = extract_domain(p.list_url)
     contents_list: list = []
-    attach_list:   list = []
     error_logs:    list = []
     filepath = None
  
@@ -763,14 +756,13 @@ async def execute_policy_scraping(req: PolicyRequest):
                     parsed = urlparse(target_url)
                     base   = f"{parsed.scheme}://{parsed.netloc}"
  
-                    conts, atts = await PolicyCrawler.extract_view_detail(
+                    conts, _ = await PolicyCrawler.extract_view_detail(
                         page, p.view_class, base, req, outbbs_cn,
                         list_title=item.get("title", ""),
                         list_url=p.list_url,
                     )
                     conts["URL"] = target_url
                     contents_list.append(conts)
-                    attach_list.extend(atts)
  
                 except Exception as e:
                     print(f"    [!] 상세 실패 ({vid}): {e}", flush=True)
@@ -784,8 +776,7 @@ async def execute_policy_scraping(req: PolicyRequest):
                 "reqId":    req.req_id,  "type":    req.type,
                 "crwId":    req.crw_id,  "fileDir": req.file_dir,
                 "result":   result_block,
-                "data": contents_list,
-                "attach":   attach_list,
+                "data":     contents_list,
                 "log":      error_logs,
             }
  
@@ -796,7 +787,7 @@ async def execute_policy_scraping(req: PolicyRequest):
                 await send_to_insert_api(
                     req_id=req.req_id, type_val=req.type, crw_id=req.crw_id,
                     file_dir=req.file_dir, result=result_block,
-                    contents=contents_list, attach=attach_list, error_logs=error_logs,
+                    contents=contents_list, error_logs=error_logs,
                 )
             else:
                 print("[!] 수집 데이터 없음, 전송 생략", flush=True)
@@ -806,7 +797,6 @@ async def execute_policy_scraping(req: PolicyRequest):
                 "file_dir": req.file_dir, "ok": True,
                 "interrupted":    app.state.stop_scraping,
                 "contents_count": len(contents_list),
-                "attach_count":   len(attach_list),
                 "saved_file":     filepath,
             }
  
@@ -821,7 +811,7 @@ async def execute_policy_scraping(req: PolicyRequest):
 async def execute_policy_scraping_test(req: PolicyRequest) -> dict:
     """테스트: 1건만 수집"""
     p = req.param
-    contents_list, attach_list = [], []
+    contents_list = []
  
     async with async_playwright() as playwright:
         browser, page = await _setup_browser(playwright)
@@ -832,7 +822,7 @@ async def execute_policy_scraping_test(req: PolicyRequest) -> dict:
  
             if not list_data:
                 return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id,
-                        "file_dir": req.file_dir, "contents": [], "attach": []}
+                        "file_dir": req.file_dir, "data": []}
  
             item    = list_data[0]
             vid     = item.get("view_id", "")
@@ -841,7 +831,7 @@ async def execute_policy_scraping_test(req: PolicyRequest) -> dict:
  
             if not is_real and not (p.view_url and vid):
                 return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id,
-                        "file_dir": req.file_dir, "contents": [], "attach": []}
+                        "file_dir": req.file_dir, "data": []}
  
             target_url = urljoin(p.list_url, href) if is_real else f"{p.view_url}?{p.view_id_param}={vid}"
             outbbs_cn      = str(time.time_ns())[:16]
@@ -850,26 +840,25 @@ async def execute_policy_scraping_test(req: PolicyRequest) -> dict:
             parsed = urlparse(target_url)
             base   = f"{parsed.scheme}://{parsed.netloc}"
  
-            conts, atts = await PolicyCrawler.extract_view_detail(
+            conts, _ = await PolicyCrawler.extract_view_detail(
                 page, p.view_class, base, req, outbbs_cn,
                 list_title=item.get("title", ""),
                 list_url=p.list_url,
             )
             conts["URL"] = target_url
             contents_list.append(conts)
-            attach_list.extend(atts)
             print(f"[TEST] 완료: OUTBBS_CN={conts['OUTBBS_CN']}", flush=True)
  
             return {
                 "req_id": req.req_id, "type": req.type,
                 "crw_id": req.crw_id, "file_dir": req.file_dir,
-                "contents": contents_list, "attach": attach_list,
+                "data": contents_list,
             }
  
         except Exception as e:
             print(f"[TEST] 에러: {e}", flush=True)
             return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id,
-                    "file_dir": req.file_dir, "contents": [], "attach": []}
+                    "file_dir": req.file_dir, "data": []}
         finally:
             await browser.close()
  
@@ -878,12 +867,12 @@ async def execute_policy_scraping_test(req: PolicyRequest) -> dict:
  
 async def send_to_insert_api(
     req_id: str, type_val: str, crw_id: str, file_dir: str,
-    result: dict, contents: list, attach: list, error_logs: list = None,
+    result: dict, contents: list, error_logs: list = None,
 ):
     target_url = "http://10.201.38.157:8080/insert_api.do"
     payload = {
         "reqId": req_id, "type": type_val, "crwId": crw_id, "fileDir": file_dir,
-        "result": result, "contents": contents, "attach": attach,
+        "result": result, "data": contents,
         "log": error_logs or [],
     }
     print(f"\n[*] [3단계] 전송 시도", flush=True)
