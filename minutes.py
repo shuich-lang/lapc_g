@@ -746,10 +746,14 @@ def extract_file_info_from_reserved_value(
 		href = normalize_text(a_tag.get("href"))
 		file_name = normalize_text(a_tag.get_text(" ", strip=True))
 
-		if not href:
-			raise ValueError("ORGINL_FILE_URL a 태그에 href가 없습니다.")
-
-		return urljoin(base_url, href), (file_name or None)
+		# href가 유효한 URL이면 그대로 반환
+		if href and href != "#" and not href.lower().startswith("javascript:"):
+			return urljoin(base_url, href), (file_name or None)
+		
+		# href가 #이거나 javascript: → 원본 a 태그 HTML을 그대로 반환
+		# download_attachment_file에서 URL이 아님을 감지하고 Playwright fallback
+		original_file = normalize_text(a_tag.get("data-original_record_file"))
+		return raw_value, (original_file or file_name or None)
 
 	# 그냥 URL만 넘어온 경우
 	return urljoin(base_url, raw_value), None
@@ -1126,7 +1130,7 @@ async def build_minutes_item_by_dynamic_regex(
 			year = extract_year_from_date(parsed.get("MTG_DE"))
 
 			# 임시 경로에 다운로드, 원본 파일명 확정
-			save_path, saved_name = await download_attachment_file(
+			save_path, saved_name, file_url = await download_attachment_file(
 				file_url=full_file_url,
 				file_name=extracted_file_name,
 				file_dir=request.file_dir,
@@ -1137,9 +1141,10 @@ async def build_minutes_item_by_dynamic_regex(
 				mints_cn=mints_cn,
 				seq=1,
 				ssl_mode=request.param.ssl_mode,
+				detail_url=detail_url or list_page_url,
 			)
 
-			parsed["ORGINL_FILE_URL"] = full_file_url
+			parsed["ORGINL_FILE_URL"] = file_url
 			parsed["MINTS_FILE_PATH"] = save_path
 			parsed["ORGINL_FILE_NM"] = saved_name
 
@@ -1178,8 +1183,29 @@ async def download_attachment_file(
 	mints_cn: str,
 	seq: int,
 	ssl_mode: str,
+	detail_url: Optional[str] = None,
 ) -> tuple[str, str]:
-	"""파일을 최종 경로에 다운로드하고 (save_path, original_name)을 반환"""
+	"""파일 다운로드. URL이면 httpx, 아니면 Playwright fallback"""
+
+	# file_url이 실제 URL인지 판단
+	is_url = file_url.startswith("http://") or file_url.startswith("https://") or file_url.startswith("/")
+	if not is_url and "<a" in file_url.lower():
+		# a 태그 HTML이 넘어온 경우 → Playwright 다운로드
+		return await _download_by_playwright(
+			detail_url=detail_url or "",
+			a_tag_html=file_url,
+			file_name=file_name,
+			file_dir=file_dir,
+			crawl_type=crawl_type,
+			crw_id=crw_id,
+			rasmbly_numpr=rasmbly_numpr,
+			year=year,
+			mints_cn=mints_cn,
+			seq=seq,
+			ssl_mode=ssl_mode,
+		)
+	
+	# 일반 url인 경우 httpx 다운로드
 	print(f"[FILE] 다운로드 시작: {file_url}")
 
 	timeout = httpx.Timeout(60.0, connect=10.0)
@@ -1230,19 +1256,111 @@ async def download_attachment_file(
 
 		print(f"[FILE] 다운로드 성공: {resolved_name} -> {save_path} ({len(response.content)} bytes)")
 
-	return save_path, resolved_name
+	return save_path, resolved_name, file_url
 
 
-def _resolve_original_filename(file_url: str, content_disposition_name: Optional[str]) -> str:
-	"""원본 파일명 결정: Content-Disposition > URL path > fallback"""
-	if content_disposition_name:
-		return normalize_text(content_disposition_name)
+async def _download_by_playwright(
+	detail_url: str,
+	a_tag_html: str,
+	file_name: Optional[str],
+	file_dir: str,
+	crawl_type: str,
+	crw_id: str,
+	rasmbly_numpr: Optional[str],
+	year: str,
+	mints_cn: str,
+	seq: int,
+	ssl_mode: str,
+) -> tuple[str, str]:
+	"""Playwright로 상세페이지를 열고 a 태그를 매칭하여 클릭 다운로드"""
 
-	path_name = urlparse(file_url).path.split("/")[-1]
-	if path_name:
-		return normalize_text(unquote(path_name))
+	selector = _build_selector_from_a_tag(a_tag_html)
+	print(f"[FILE-PW] 다운로드 시도: {detail_url} | selector: {selector}")
 
-	return "unknown"
+	try:
+		async with async_playwright() as p:
+			browser = await p.chromium.launch(headless=True)
+			context = await browser.new_context(
+				user_agent=USER_AGENT,
+				ignore_https_errors=(ssl_mode == "N"),
+				accept_downloads=True,
+			)
+			page = await context.new_page()
+			await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+			await page.wait_for_timeout(500)
+
+			target = page.locator(selector).first
+			if await target.count() == 0:
+				await browser.close()
+				raise ValueError(f"다운로드 대상 요소를 찾지 못했습니다. selector: {selector}")
+
+			async with page.expect_download(timeout=30000) as download_info:
+				await target.click()
+
+			download = await download_info.value
+			download_url = download.url
+			print(f"[FILE-PW] 다운로드 URL 감지: {download_url}")
+			suggested_name = download.suggested_filename or file_name or "unknown.bin"
+			resolved_name = normalize_text(suggested_name)
+
+			save_path = build_file_save_path(
+				file_dir=file_dir,
+				crawl_type=crawl_type,
+				crw_id=crw_id,
+				rasmbly_numpr=rasmbly_numpr,
+				year=year,
+				mints_cn=mints_cn,
+				seq=seq,
+				original_filename=resolved_name,
+			)
+
+			os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+			if os.path.exists(save_path):
+				await browser.close()
+				return save_path, resolved_name
+
+			await download.save_as(save_path)
+			print(f"[FILE-PW] 다운로드 성공: {resolved_name} -> {save_path}")
+
+			await browser.close()
+			return save_path, resolved_name, download_url
+
+	except Exception as exc:
+		raise ValueError(f"Playwright 파일 다운로드 실패: {type(exc).__name__} / {str(exc)}") from exc
+
+
+def _build_selector_from_a_tag(a_tag_html: str) -> str:
+	"""a 태그 HTML의 모든 속성을 읽어 CSS selector 자동 생성"""
+	soup = BeautifulSoup(a_tag_html, "lxml")
+	a_tag = soup.find("a")
+	if not a_tag:
+		return "a"
+
+	parts = ["a"]
+
+	raw_classes = a_tag.get("class", [])
+	if isinstance(raw_classes, str):
+		raw_classes = raw_classes.split()
+	classes = [c.strip() for c in raw_classes if c.strip()]
+	if classes:
+		parts[0] += "." + ".".join(classes)
+
+	skip_attrs = {"class", "href"}
+	for attr_name, attr_value in a_tag.attrs.items():
+		if attr_name in skip_attrs:
+			continue
+		if isinstance(attr_value, list):
+			attr_value = " ".join(attr_value)
+		val = normalize_text(str(attr_value))
+		if val:
+			if len(val) > 60:
+				short = val[:50].replace('"', '\\"')
+				parts.append(f'[{attr_name}*="{short}"]')
+			else:
+				parts.append(f'[{attr_name}="{val}"]')
+
+	return "".join(parts)
 
 
 async def run_minutes_all_and_callback(request: RegexCrawlRequest) -> None:
