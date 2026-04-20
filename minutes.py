@@ -1086,6 +1086,7 @@ async def build_minutes_item_by_dynamic_regex(
 
 	uid = extract_uid(detail_url)
 	mints_cn = "CLIKR" + str(time.time_ns())
+	mints_cn = mints_cn[:21]
 
 	# 2순위: 상세 페이지에서 대수 추출
 	if not rasmbly_numpr and detail_html:
