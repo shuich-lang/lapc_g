@@ -500,6 +500,8 @@ def build_minutes_callback_payload(
 			row["url"] = item.detail_url
 			row["mints_cn"] = item.mints_cn
 			data.append(row)
+	
+	data.reverse()
 
 	return {
 		"req_id": request.req_id,
