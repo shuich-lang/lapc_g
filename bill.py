@@ -1,5 +1,4 @@
-﻿
-import os
+﻿import os
 import re
 import httpx
 import json
@@ -44,6 +43,19 @@ _P_HYPHEN_NUMPR_SESN = re.compile(r'(\d+)\s*대\s*[-–—]\s*(\d+)\s*회')  # "
 # 날짜 형식
 _DATE_PATTERN = re.compile(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})')
 
+# LAST_DATA 비교용 핵심 필드 목록 / 하드코딩없이 우선순위 순으로 시도
+_LAST_DATA_MATCH_KEYS: List[str] = ["URL","BI_SJ","BI_CN","BI_NO",]
+
+# ────────────────────────────────────────────────────────────
+# [신규] last_data 모델
+# ────────────────────────────────────────────────────────────
+class LastData(BaseModel):
+    model_config = {"extra": "allow"}
+    URL:     Optional[str] = Field(None, description="이전 수집 상세 URL")
+    BI_SJ:   Optional[str] = Field(None, description="이전 수집 의안 제목")
+    BI_CN:   Optional[str] = Field(None, description="이전 수집 내부 관리번호")
+    BI_NO:   Optional[str] = Field(None, description="이전 수집 의안번호")
+
 # 상세 파라미터
 class ScrapeParam(BaseModel):
     list_url: str = Field(..., description="의회 리스트 URL")
@@ -69,6 +81,8 @@ class ScrapeRequest(BaseModel):
     
     # 중첩 구조 정의
     param: ScrapeParam = Field(..., description="크롤링 상세 설정")
+
+    last_data: Optional[LastData] = Field(None, description="추가수집 기준점 (없으면 전체 수집)")
 
     @field_validator('req_id', 'type', 'crw_id', 'file_dir')
     @classmethod
@@ -270,7 +284,101 @@ def parse_value(mapped_key: str, raw_value: str) -> Dict[str, str]:
         return {mapped_key: _normalize_date(raw_value)}
     
     return {mapped_key: raw_value}
-    
+
+# ────────────────────────────────────────────────────────────────────────────
+# [신규] last_data 매칭 유틸리티
+# ────────────────────────────────────────────────────────────────────────────
+
+def _build_last_data_signature(last_data: LastData) -> Dict[str, str]:
+    """
+    last_data 에서 비교 가능한 필드만 추출해 딕셔너리로 반환.
+    extra 필드(model_extra)도 포함하여 향후 확장에 대비.
+    """
+    sig: Dict[str, str] = {}
+    # 선언된 필드
+    for key in _LAST_DATA_MATCH_KEYS:
+        val = getattr(last_data, key, None)
+        if val and str(val).strip():
+            sig[key] = str(val).strip()
+    # extra 필드 (LastData에 선언되지 않은 필드도 비교 대상에 추가)
+    for key, val in (last_data.model_extra or {}).items():
+        if val and str(val).strip():
+            sig[key] = str(val).strip()
+    return sig
+
+
+def is_last_data_match(item: Dict[str, Any], last_sig: Dict[str, str]) -> bool:
+    """
+    수집된 item 이 last_data 와 일치하는지 판단.
+
+    매칭 전략 (하드코딩 없이 _LAST_DATA_MATCH_KEYS 순서 우선):
+      1. view_id 가 last_sig 에 있고 item['view_id'] 와 같으면 → True
+      2. URL 이 last_sig 에 있고 item['URL'] 과 같으면 → True
+      3. BI_SJ 이 last_sig 에 있고 item['BI_SJ'] 과 같으면 → True
+      4. BI_CN 이 last_sig 에 있고 item['BI_CN'] 과 같으면 → True
+      5. BI_NO 가 last_sig 에 있고 item['BI_NO'] 과 같으면 → True
+      6. extra 필드 중 item 에 동일 키/값이 존재하면 → True
+      → 모두 불일치하면 False
+    """
+    if not last_sig:
+        return False
+
+    for key in _LAST_DATA_MATCH_KEYS:
+        if key in last_sig and last_sig[key]:
+            item_val = str(item.get(key, "")).strip()
+            if item_val and item_val == last_sig[key]:
+                print(f"[last_data] '{key}' 일치 → 추가수집 중단 기준점 도달: {last_sig[key]}", flush=True)
+                return True
+
+    # extra 필드 비교 (선언되지 않은 필드)
+    # for key, sig_val in last_sig.items():
+    #     if key in _LAST_DATA_MATCH_KEYS:
+    #         continue  # 이미 위에서 처리
+    #     item_val = str(item.get(key, "")).strip()
+    #     if item_val and item_val == sig_val:
+    #         print(f"[last_data] extra 필드 '{key}' 일치 → 추가수집 중단 기준점 도달: {sig_val}", flush=True)
+    #         return True
+
+    return False
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# [신규] last_data 리스트 단계 조기 중단 판별
+#
+# 리스트 단계에서 view_id 또는 URL로 먼저 필터링하여
+# 불필요한 상세 페이지 진입을 사전에 차단
+# ────────────────────────────────────────────────────────────────────────────
+
+def is_list_item_past_last(list_item: Dict[str, Any], last_sig: Dict[str, str]) -> bool:
+    """
+    리스트 수집 결과의 단일 item 이 last_data 의 기준점 이후 데이터인지 판별.
+    (view_id / link_href / URL 중 하나라도 일치하면 True)
+
+    - list_item: extract_list_page() 반환 형식
+                 {"view_id": "...", "link_href": "...", "BI_SJ": "...", ...}
+    - last_sig : _build_last_data_signature() 반환값
+    """
+    if not last_sig:
+        return False
+
+    # view_id 비교
+    vid = str(list_item.get("view_id", "")).strip()
+    if vid and last_sig.get("view_id") and vid == last_sig["view_id"]:
+        print(f"[last_data][리스트] view_id 일치 → 이후 항목 모두 건너뜀: {vid}", flush=True)
+        return True
+
+    # URL 비교: link_href 가 last_sig URL의 끝 부분을 포함하는지
+    href = str(list_item.get("link_href", "")).strip()
+    last_url = last_sig.get("URL", "")
+    if href and last_url:
+        # 절대 URL 과 상대 URL 모두 대응 (파라미터 포함 비교)
+        if href == last_url or (href and href in last_url) or (last_url and last_url.endswith(href)):
+            print(f"[last_data][리스트] URL 일치 → 이후 항목 모두 건너뜀: {href}", flush=True)
+            return True
+
+    return False
+
+
 # --- 브라우저 / 페이지네이션 헬퍼 ---
 
 async def _setup_browser(pw):
@@ -281,9 +389,10 @@ async def _setup_browser(pw):
     return browser, page
 
 async def _collect_pages(page, list_url, numpr, list_class, vid_param,
-                         max_pages, paging_sel, next_btn_sel, end_btn_sel, extractor, stop_check, search_form_selector, numpr_select_selector, search_btn_selector):
+                         max_pages, paging_sel, next_btn_sel, end_btn_sel, extractor, stop_check, search_form_selector, numpr_select_selector, search_btn_selector, last_sig: Optional[Dict[str, str]] = None):
     """공통 리스트 수집 루프 (필터 + 페이지네이션)"""
-    collect_errors = []  # ← 추가
+    collect_errors = []
+    last_data_reached = False  # ← [신규] 중단 플래그
 
     await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
     
@@ -306,7 +415,23 @@ async def _collect_pages(page, list_url, numpr, list_class, vid_param,
             break
         print(f"[*] 수집: {cp}/{target}p", flush=True)
         try:
-            data.extend(await extractor(page, list_class, vid_param))
+            page_items = await extractor(page, list_class, vid_param)  # 페이지에서 데이터 추출
+        
+            if last_sig:
+                filtered_items = []
+                for li in page_items:
+                    if is_list_item_past_last(li, last_sig):
+                        # 기준점 도달 → 해당 항목 포함하지 않고 루프 종료
+                        last_data_reached = True
+                        break
+                    filtered_items.append(li)
+                data.extend(filtered_items)
+                if last_data_reached:
+                    print(f"[last_data] {cp}p 에서 기준점 도달 → 리스트 수집 중단", flush=True)
+                    break
+            else:
+                data.extend(page_items)
+
         except Exception as e:
             msg = str(e)
             # ← 어떤 셀렉터에서 실패했는지 파싱
@@ -318,9 +443,11 @@ async def _collect_pages(page, list_url, numpr, list_class, vid_param,
                 "selector": sel_match.group(1) if sel_match else list_class,
                 "error": msg[:300]
             })
-        if cp < target and not await UniversalCrawler.go_to_page(page, cp + 1, paging_sel, next_btn_sel):
-            await _try_url_fallback(page, cp + 1)
-    return data, collect_errors
+        if cp < target and not last_data_reached:
+            if not await UniversalCrawler.go_to_page(page, cp + 1, paging_sel, next_btn_sel):
+                await _try_url_fallback(page, cp + 1)
+
+    return data, collect_errors, last_data_reached  # ← [신규] last_data_reached 반환
 
 async def _try_url_fallback(page, next_page):
     """페이지 이동 실패 시 URL 파라미터 직접 치환"""
@@ -862,6 +989,13 @@ async def execute_view_scraping(req: ScrapeRequest):
     list_data, view_data = [], []
     filepath = None
     error_logs = []
+
+    # last_data 가 없으면 None → 기존 전체 수집 동작 그대로 유지
+    last_sig: Optional[Dict[str, str]] = (
+        _build_last_data_signature(req.last_data) if req.last_data else None
+    )
+    if last_sig:
+        print(f"[last_data] 추가수집 모드 활성화. 기준점: {last_sig}", flush=True)
     
     async with async_playwright() as playwright:
         browser, page = await _setup_browser(playwright)
@@ -869,11 +1003,11 @@ async def execute_view_scraping(req: ScrapeRequest):
             # 1단계: 리스트 수집
             print(f"\n{'='*60}", flush=True)
             print(f"[*] [1단계] 리스트 수집 시작: {p.list_url}", flush=True)
-            list_data, collect_errors = await _collect_pages(
+            list_data, collect_errors, last_data_reached = await _collect_pages(
                 page, p.list_url, p.rasmbly_numpr, p.list_class, p.view_id_param,
                 p.max_pages, p.paging_selector, p.next_btn_selector, p.end_btn_selector,
                 UniversalCrawler.extract_list_page, lambda: app.state.stop_scraping,
-                p.search_form_selector, p.numpr_select_selector, p.search_btn_selector,
+                p.search_form_selector, p.numpr_select_selector, p.search_btn_selector, last_sig=last_sig, 
             )
             error_logs.extend(collect_errors)
 
@@ -890,6 +1024,8 @@ async def execute_view_scraping(req: ScrapeRequest):
             total = len(list_data)
             print(f"\n[*] [2단계] 상세 수집 시작 (총 {total}건)", flush=True)
             print(f"{'-'*60}", flush=True)
+
+            detail_last_data_reached = False  # ← [신규] 상세 단계 중단 플래그
 
             for idx, item in enumerate(list_data):
                 # [/stop 요청 감지]
@@ -915,7 +1051,17 @@ async def execute_view_scraping(req: ScrapeRequest):
                     
                     bi_cn  = str(str(time.time_ns())[:16])
                     detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base, req=req, bi_cn=bi_cn)
-                    view_data.append({"view_id": vid, "URL": target_url, "BI_CN": f"CLIKC{bi_cn}", **detail})
+                    collected_item = {"view_id": vid, "URL": target_url, "BI_CN": f"CLIKC{bi_cn}", **detail}
+
+                    # ── [신규] 상세 데이터 기준 last_data 비교 ────────────────
+                    # 리스트 단계에서 걸러지지 않은 경우의 보조 안전망
+                    if last_sig and not last_data_reached and is_last_data_match(collected_item, last_sig):
+                        detail_last_data_reached = True
+                        print(f"[last_data] 상세 단계에서 기준점 도달 → 수집 중단 후 전송", flush=True)
+                        break
+                    # ────────────────────────────────────────────────────────
+
+                    view_data.append(collected_item)
                     
                 except Exception as e:
                     print(f"    [!] ID: {vid} 수집 실패: {e}", flush=True)
@@ -928,7 +1074,19 @@ async def execute_view_scraping(req: ScrapeRequest):
                         "error": str(e)
                     })
 
-            result_block = _build_result(view_data, error_logs, app.state.stop_scraping)
+            is_interrupted = (
+                app.state.stop_scraping
+                or last_data_reached
+                or detail_last_data_reached
+            )
+            # ────────────────────────────────────────────────────────────────
+
+            result_block = _build_result(view_data, error_logs, is_interrupted)
+
+            # ── [신규] last_data 모드일 때 result message 보완 ───────────────
+            if (last_data_reached or detail_last_data_reached) and result_block["status"] in ("SUCCESS", "PARTIAL"):
+                result_block["message"] = "추가수집 완료 (last_data 기준점 도달)"
+            # ────────────────────────────────────────────────────────────────
 
             full_payload = {
                     "reqId":   req.req_id,
@@ -940,6 +1098,7 @@ async def execute_view_scraping(req: ScrapeRequest):
                     "log":     error_logs  # ← 에러 로그 포함
                 }
             
+            view_data.reverse()
             # --- 루프 종료 후 공통 처리 (정상 종료 또는 중단 시 모두 실행) ---
             if view_data or error_logs:
                 if view_data:
@@ -968,7 +1127,8 @@ async def execute_view_scraping(req: ScrapeRequest):
                 "crw_id": req.crw_id, 
                 "file_dir": req.file_dir,
                 "ok": True, 
-                "interrupted": app.state.stop_scraping,
+                "interrupted": is_interrupted,
+                "last_data_reached": last_data_reached or detail_last_data_reached,  # ← [신규]
                 "data_count": len(view_data), 
                 "saved_file": filepath
             }
@@ -1085,6 +1245,7 @@ async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
                     print(f"[TEST] 상세 수집 실패: {e}", flush=True)
                     view_data.append({"view_id": vid, "view_url": target_url, "view_error": str(e)})
 
+            view_data.reverse()
             return {
                 "req_id": req.req_id,
                 "type": req.type,
