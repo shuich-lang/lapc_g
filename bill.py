@@ -1,5 +1,4 @@
-﻿
-import os
+﻿import os
 import re
 import httpx
 import json
@@ -44,6 +43,19 @@ _P_HYPHEN_NUMPR_SESN = re.compile(r'(\d+)\s*대\s*[-–—]\s*(\d+)\s*회')  # "
 # 날짜 형식
 _DATE_PATTERN = re.compile(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})')
 
+# LAST_DATA 비교용 핵심 필드 목록 / 하드코딩없이 우선순위 순으로 시도
+_LAST_DATA_MATCH_KEYS: List[str] = ["URL","BI_SJ","BI_CN","BI_NO",]
+
+# ────────────────────────────────────────────────────────────
+# [신규] last_data 모델
+# ────────────────────────────────────────────────────────────
+class LastData(BaseModel):
+    model_config = {"extra": "allow"}
+    URL:     Optional[str] = Field(None, description="이전 수집 상세 URL")
+    BI_SJ:   Optional[str] = Field(None, description="이전 수집 의안 제목")
+    BI_CN:   Optional[str] = Field(None, description="이전 수집 내부 관리번호")
+    BI_NO:   Optional[str] = Field(None, description="이전 수집 의안번호")
+
 # 상세 파라미터
 class ScrapeParam(BaseModel):
     list_url: str = Field(..., description="의회 리스트 URL")
@@ -69,6 +81,8 @@ class ScrapeRequest(BaseModel):
     
     # 중첩 구조 정의
     param: ScrapeParam = Field(..., description="크롤링 상세 설정")
+
+    last_data: Optional[LastData] = Field(None, description="추가수집 기준점 (없으면 전체 수집)")
 
     @field_validator('req_id', 'type', 'crw_id', 'file_dir')
     @classmethod
@@ -132,10 +146,17 @@ def get_mapped_key(label: str, section: Optional[str] = None) -> str:
     label = clean_text(label)
     normalized = label.replace(" ", "")
     if section:
-        sec_key = "위원회" if "위원회" in section else ("본회의" if "본회의" in section else section)
-        for mk, mv in SECTION_FIELD_MAP.get(sec_key, {}).items():
+        # 1차: 원본 섹션명으로 직접 탐색 (예: "소관위원회 심사경과" 그대로)
+        for mk, mv in SECTION_FIELD_MAP.get(section, {}).items():
             if mk.replace(" ", "") == normalized:
                 return mv
+        # 2차: 축약 sec_key로 탐색 (예: "위원회", "본회의")
+        sec_key = "위원회" if "위원회" in section else ("본회의" if "본회의" in section else section)
+        if sec_key != section:
+            for mk, mv in SECTION_FIELD_MAP.get(sec_key, {}).items():
+                if mk.replace(" ", "") == normalized:
+                    return mv
+    # 3차: 섹션 무관 전체 FIELD_MAP
     for mk, mv in FIELD_MAP.items():
         if mk.replace(" ", "") == normalized:
             return mv
@@ -270,7 +291,101 @@ def parse_value(mapped_key: str, raw_value: str) -> Dict[str, str]:
         return {mapped_key: _normalize_date(raw_value)}
     
     return {mapped_key: raw_value}
-    
+
+# ────────────────────────────────────────────────────────────────────────────
+# [신규] last_data 매칭 유틸리티
+# ────────────────────────────────────────────────────────────────────────────
+
+def _build_last_data_signature(last_data: LastData) -> Dict[str, str]:
+    """
+    last_data 에서 비교 가능한 필드만 추출해 딕셔너리로 반환.
+    extra 필드(model_extra)도 포함하여 향후 확장에 대비.
+    """
+    sig: Dict[str, str] = {}
+    # 선언된 필드
+    for key in _LAST_DATA_MATCH_KEYS:
+        val = getattr(last_data, key, None)
+        if val and str(val).strip():
+            sig[key] = str(val).strip()
+    # extra 필드 (LastData에 선언되지 않은 필드도 비교 대상에 추가)
+    for key, val in (last_data.model_extra or {}).items():
+        if val and str(val).strip():
+            sig[key] = str(val).strip()
+    return sig
+
+
+def is_last_data_match(item: Dict[str, Any], last_sig: Dict[str, str]) -> bool:
+    """
+    수집된 item 이 last_data 와 일치하는지 판단.
+
+    매칭 전략 (하드코딩 없이 _LAST_DATA_MATCH_KEYS 순서 우선):
+      1. view_id 가 last_sig 에 있고 item['view_id'] 와 같으면 → True
+      2. URL 이 last_sig 에 있고 item['URL'] 과 같으면 → True
+      3. BI_SJ 이 last_sig 에 있고 item['BI_SJ'] 과 같으면 → True
+      4. BI_CN 이 last_sig 에 있고 item['BI_CN'] 과 같으면 → True
+      5. BI_NO 가 last_sig 에 있고 item['BI_NO'] 과 같으면 → True
+      6. extra 필드 중 item 에 동일 키/값이 존재하면 → True
+      → 모두 불일치하면 False
+    """
+    if not last_sig:
+        return False
+
+    for key in _LAST_DATA_MATCH_KEYS:
+        if key in last_sig and last_sig[key]:
+            item_val = str(item.get(key, "")).strip()
+            if item_val and item_val == last_sig[key]:
+                print(f"[last_data] '{key}' 일치 → 추가수집 중단 기준점 도달: {last_sig[key]}", flush=True)
+                return True
+
+    # extra 필드 비교 (선언되지 않은 필드)
+    # for key, sig_val in last_sig.items():
+    #     if key in _LAST_DATA_MATCH_KEYS:
+    #         continue  # 이미 위에서 처리
+    #     item_val = str(item.get(key, "")).strip()
+    #     if item_val and item_val == sig_val:
+    #         print(f"[last_data] extra 필드 '{key}' 일치 → 추가수집 중단 기준점 도달: {sig_val}", flush=True)
+    #         return True
+
+    return False
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# [신규] last_data 리스트 단계 조기 중단 판별
+#
+# 리스트 단계에서 view_id 또는 URL로 먼저 필터링하여
+# 불필요한 상세 페이지 진입을 사전에 차단
+# ────────────────────────────────────────────────────────────────────────────
+
+def is_list_item_past_last(list_item: Dict[str, Any], last_sig: Dict[str, str]) -> bool:
+    """
+    리스트 수집 결과의 단일 item 이 last_data 의 기준점 이후 데이터인지 판별.
+    (view_id / link_href / URL 중 하나라도 일치하면 True)
+
+    - list_item: extract_list_page() 반환 형식
+                 {"view_id": "...", "link_href": "...", "BI_SJ": "...", ...}
+    - last_sig : _build_last_data_signature() 반환값
+    """
+    if not last_sig:
+        return False
+
+    # view_id 비교
+    vid = str(list_item.get("view_id", "")).strip()
+    if vid and last_sig.get("view_id") and vid == last_sig["view_id"]:
+        print(f"[last_data][리스트] view_id 일치 → 이후 항목 모두 건너뜀: {vid}", flush=True)
+        return True
+
+    # URL 비교: link_href 가 last_sig URL의 끝 부분을 포함하는지
+    href = str(list_item.get("link_href", "")).strip()
+    last_url = last_sig.get("URL", "")
+    if href and last_url:
+        # 절대 URL 과 상대 URL 모두 대응 (파라미터 포함 비교)
+        if href == last_url or (href and href in last_url) or (last_url and last_url.endswith(href)):
+            print(f"[last_data][리스트] URL 일치 → 이후 항목 모두 건너뜀: {href}", flush=True)
+            return True
+
+    return False
+
+
 # --- 브라우저 / 페이지네이션 헬퍼 ---
 
 async def _setup_browser(pw):
@@ -281,9 +396,10 @@ async def _setup_browser(pw):
     return browser, page
 
 async def _collect_pages(page, list_url, numpr, list_class, vid_param,
-                         max_pages, paging_sel, next_btn_sel, end_btn_sel, extractor, stop_check, search_form_selector, numpr_select_selector, search_btn_selector):
+                         max_pages, paging_sel, next_btn_sel, end_btn_sel, extractor, stop_check, search_form_selector, numpr_select_selector, search_btn_selector, last_sig: Optional[Dict[str, str]] = None):
     """공통 리스트 수집 루프 (필터 + 페이지네이션)"""
-    collect_errors = []  # ← 추가
+    collect_errors = []
+    last_data_reached = False  # ← [신규] 중단 플래그
 
     await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
     
@@ -306,7 +422,23 @@ async def _collect_pages(page, list_url, numpr, list_class, vid_param,
             break
         print(f"[*] 수집: {cp}/{target}p", flush=True)
         try:
-            data.extend(await extractor(page, list_class, vid_param))
+            page_items = await extractor(page, list_class, vid_param)  # 페이지에서 데이터 추출
+        
+            if last_sig:
+                filtered_items = []
+                for li in page_items:
+                    if is_list_item_past_last(li, last_sig):
+                        # 기준점 도달 → 해당 항목 포함하지 않고 루프 종료
+                        last_data_reached = True
+                        break
+                    filtered_items.append(li)
+                data.extend(filtered_items)
+                if last_data_reached:
+                    print(f"[last_data] {cp}p 에서 기준점 도달 → 리스트 수집 중단", flush=True)
+                    break
+            else:
+                data.extend(page_items)
+
         except Exception as e:
             msg = str(e)
             # ← 어떤 셀렉터에서 실패했는지 파싱
@@ -318,9 +450,11 @@ async def _collect_pages(page, list_url, numpr, list_class, vid_param,
                 "selector": sel_match.group(1) if sel_match else list_class,
                 "error": msg[:300]
             })
-        if cp < target and not await UniversalCrawler.go_to_page(page, cp + 1, paging_sel, next_btn_sel):
-            await _try_url_fallback(page, cp + 1)
-    return data, collect_errors
+        if cp < target and not last_data_reached:
+            if not await UniversalCrawler.go_to_page(page, cp + 1, paging_sel, next_btn_sel):
+                await _try_url_fallback(page, cp + 1)
+
+    return data, collect_errors, last_data_reached  # ← [신규] last_data_reached 반환
 
 async def _try_url_fallback(page, next_page):
     """페이지 이동 실패 시 URL 파라미터 직접 치환"""
@@ -388,7 +522,7 @@ class UniversalCrawler:
                         # 결과가 list_class 영역에 주입될 때까지 대기
                         await page.wait_for_function(
                             f"""() => {{
-                                const el = document.querySelector('{normalize_selector(list_class)} tbody tr');
+                                const el = document.querySelector('{normalize_selector(list_class)} tbody > tr');
                                 return el !== null;
                             }}""",
                             timeout=15000
@@ -505,7 +639,7 @@ class UniversalCrawler:
         await page.wait_for_selector(selector, timeout=10000)
 
         items = []
-        for row in await page.query_selector_all(f"{selector} tbody tr, {selector} ul > li, {selector} .list_row"):
+        for row in await page.query_selector_all(f"{selector} tbody > tr, {selector} ul > li, {selector} .list_row"):
             tds = await row.query_selector_all("td") or await row.query_selector_all("div, span")
             if not tds: continue
             item = {"row_texts": [clean_text(await td.inner_text()) for td in tds]}
@@ -527,7 +661,16 @@ class UniversalCrawler:
         section, rs_counter = None, 0
         year = str(datetime.now().year)
 
-        rows = await page.query_selector_all(f"{selector} tbody tr, {selector} > li, {selector} .view_row")
+        # ── [패턴 D 조기 감지] h4.check 있으면 h4+table 구조 우선 처리 후
+        # rows 루프는 중첩 테이블 오염 방지를 위해 건너뜀
+        _h4_tables_parsed = await UniversalCrawler._parse_h4_section_tables(
+            page, selector, result
+        )
+        if _h4_tables_parsed:
+            # h4+table 구조에서 처리된 경우 rows 루프 skip → 아래 보완 로직만 실행
+            rows = []
+        else:
+            rows = await page.query_selector_all(f"{selector} tbody > tr, {selector} > li, {selector} .view_row")
 
         for row in rows:
             try:
@@ -618,6 +761,15 @@ class UniversalCrawler:
                         ti += 1; di += 1
 
                 for label, td_el in pairs:
+                    td_html = (await td_el.inner_html()).lower()
+ 
+                    # 중첩 테이블 감지: td 안에 <table>이 있으면 섹션별 재귀 파싱 / 심사경과처럼 소관위원회/본회의 서브테이블이 td 하나에 묶인 구조 대응
+                    if "<table" in td_html:
+                        await UniversalCrawler._parse_nested_section_tables(
+                            td_el, result, section
+                        )
+                        continue
+
                     val = clean_text(await td_el.inner_text())
                     is_file = any(x in label for x in ["첨부", "파일", "원문", "의안명", "원안", "수정안", "심사보고서", "공포문"])
                     is_meeting = "회의록" in label
@@ -656,19 +808,19 @@ class UniversalCrawler:
                 print(f"[-] row 파싱 에러: {e}", flush=True)
                 continue
 
-            if not result.get("BI_SJ"): # 평창군의회,부산시의회,서울특별시의회,종로구의회 등 한정 기능 (제목 하드 수집)
-                for sel in ("table[summary='제목'] td", "div.ViewBoxHead", "th.vision2Tit", "h4.taC", "p.title", "h1.title", "h2.title", "div.view_top h2", ".view_title", ".board_title", "#title", "thead th[colspan]", "div.bbs_vtop h4", "th.text-left.pl-2"):
-                    try:
-                        el = await page.query_selector(sel)
-                        if el:
-                            text = clean_text(await el.inner_text())
-                            if text:
-                                result["BI_SJ"] = text
-                                print(f"[+] BI_SJ 수집 실패시 발동 수집: {sel} → {text[:30]}", flush=True)
-                                break
-                    except:
-                        continue
-        
+        if not result.get("BI_SJ"): # 평창군의회,부산시의회,서울특별시의회,종로구의회 등 한정 기능 (제목 하드 수집)
+            for sel in ("table[summary='제목'] td", "div.ViewBoxHead", "th.vision2Tit", "h4.taC", "p.title", "h1.title", "h2.title", "div.view_top h2", ".view_title", ".board_title", "#title", "thead th[colspan]", "div.bbs_vtop h4", "th.text-left.pl-2", ".view_title th"):
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        text = clean_text(await el.inner_text())
+                        if text:
+                            result["BI_SJ"] = text
+                            print(f"[+] BI_SJ 수집 실패시 발동 수집: {sel} → {text[:30]}", flush=True)
+                            break
+                except:
+                    continue
+
         # req에서 받은 값으로 빈 필드 보완
         FALLBACK_FIELDS = {
             "RASMBLY_NUMPR": getattr(req.param, "rasmbly_numpr", None),
@@ -678,6 +830,277 @@ class UniversalCrawler:
                 result[field] = str(fallback_val)
 
         return result
+    
+    @staticmethod
+    async def _parse_nested_section_tables(container, result: dict, outer_section: Optional[str]):
+        """
+        td 안에 중첩된 <table> 구조를 레이아웃에 따라 자동 분기.
+
+        [패턴 A] 전라남도의회, 담양군의회 — 섹션헤더: tbody의 th만 있는 행, 데이터: th+td 같은 행
+        [패턴 B] 부산광역시의회   — 섹션헤더: 첫 행에 th[rowspan] 2개 이상 (병렬 컬럼)
+        [패턴 C] 제주시의회         — 섹션헤더: thead, 데이터: th행(라벨)/td행(값) 교대
+        [패턴 D] 경상북도의회
+        [패턴 E] 경산시의회 - 내 th 없이 td[rowspan]으로 섹션 구분하는 구조.
+
+        하드코딩 없이 SECTION_FIELD_MAP + FIELD_MAP 위임.
+        """
+        sub_tables = await container.query_selector_all("table")
+        if not sub_tables:
+            return
+
+        for tbl in sub_tables:
+            # ── 섹션 헤더를 thead에서 먼저 추출 (패턴 C 대응) ─────────────────
+            thead_section: Optional[str] = None
+            thead_th = await tbl.query_selector("thead th")
+            if thead_th:
+                t = clean_text(await thead_th.inner_text())
+                if t:
+                    thead_section = t
+
+            rows = await tbl.query_selector_all("tbody > tr, tr")
+            if not rows:
+                continue
+
+            # ── 패턴 판별 ─────────────────────────────────────────────────────
+            # 첫 행의 th 중 rowspan > 1 이면 패턴 B
+            first_row_ths = await rows[0].query_selector_all("th")
+            is_pattern_b  = False
+            for th in first_row_ths:
+                rs = await th.get_attribute("rowspan")
+                if rs and int(rs) > 1:
+                    is_pattern_b = True
+                    break
+
+            # 패턴 C: thead 섹션헤더가 있고, tbody 첫 행이 th만 있는 경우
+            first_row_tds = await rows[0].query_selector_all("td")
+            is_pattern_c  = bool(thead_section and first_row_ths and not first_row_tds)
+
+            # 패턴 E: th 없이 td[rowspan]으로 섹션 구분 (중첩 테이블 내에서도 발동 가능)
+            # 첫 행 all_tds로 _detect_td_rowspan_section 호출
+            first_row_all_tds = await rows[0].query_selector_all("td, dd")
+            is_pattern_e = bool(
+                not first_row_ths
+                and await UniversalCrawler._detect_td_rowspan_section(first_row_all_tds)
+            )
+
+            if is_pattern_b:
+                await UniversalCrawler._parse_rowspan_sections(rows, result)
+            elif is_pattern_c:
+                await UniversalCrawler._parse_label_value_rows_c(
+                    rows, result, thead_section
+                )
+            elif is_pattern_e:
+                await UniversalCrawler._parse_td_rowspan_section_rows(rows, result)
+            else:
+                await UniversalCrawler._parse_colspan_sections(
+                    rows, result, thead_section or outer_section
+                )
+
+        print(f"[+] 중첩테이블 파싱 완료 ({len(sub_tables)}개 테이블)", flush=True)
+
+    @staticmethod
+    async def _parse_colspan_sections(rows, result: dict, outer_section: Optional[str]):
+        """ 패턴 A: th(colspan, td없음)가 섹션 헤더인 구조 파싱 전라남도의회처럼 섹션 헤더가 별도 tr에 있는 경우 """
+        sub_section = outer_section
+        for row in rows:
+            ths = await row.query_selector_all("th")
+            tds = await row.query_selector_all("td")
+
+            # 섹션 헤더 행: th만 있고 td 없음
+            if ths and not tds:
+                header_text = clean_text(await ths[0].inner_text())
+                if header_text:
+                    sub_section = header_text
+                    print(f"[+] 중첩테이블 섹션(A) 감지: {sub_section!r}", flush=True)
+                continue
+
+            if not ths or not tds:
+                continue
+
+            for th, td in zip(ths, tds):
+                label  = clean_text(await th.inner_text())
+                val    = clean_text(await td.inner_text())
+                if not label:
+                    continue
+                mapped = get_mapped_key(label, sub_section)
+                if mapped == label:
+                    continue
+                for k, v in parse_value(mapped, val).items():
+                    if k not in result or not result[k]:
+                        result[k] = v
+
+    @staticmethod
+    async def _parse_rowspan_sections(rows, result: dict):
+        """ 패턴 B: th[rowspan]이 데이터 td와 같은 tr에 나란히 있는 구조 파싱. """
+        sections = []
+        cur_section, td_in_section = None, 0
+        for cell in await rows[0].query_selector_all("th, td"):
+            tag  = await cell.evaluate("el => el.tagName.toLowerCase()")
+            text = clean_text(await cell.inner_text())
+            rs   = await cell.get_attribute("rowspan")
+            if tag == "th" and rs and int(rs) > 1:
+                if cur_section is not None:
+                    sections.append({"name": cur_section, "td_count": td_in_section})
+                cur_section, td_in_section = text, 0
+            elif tag == "td":
+                td_in_section += 1
+        if cur_section is not None:
+            sections.append({"name": cur_section, "td_count": td_in_section})
+
+        if not sections:
+            return
+
+        print(f"[+] 중첩테이블 섹션(B) 감지: {[s['name'] for s in sections]}", flush=True)
+
+        for row in rows:
+            td_texts = [clean_text(await td.inner_text())
+                        for td in await row.query_selector_all("td")]
+            cursor = 0
+            for sec in sections:
+                n       = sec["td_count"]
+                sec_tds = td_texts[cursor:cursor + n]
+                cursor += n
+                for i in range(0, len(sec_tds) - 1, 2):
+                    label, val = sec_tds[i], sec_tds[i + 1]
+                    if not label: continue
+                    mapped = get_mapped_key(label, sec["name"])
+                    if mapped == label: continue
+                    for k, v in parse_value(mapped, val).items():
+                        if k not in result or not result[k]:
+                            result[k] = v
+
+    @staticmethod
+    async def _parse_label_value_rows_c(rows, result: dict, sub_section: Optional[str]):
+        """ 패턴 C: thead에 섹션헤더, tbody에 th행(라벨)/td행(값) 교대 구조 파싱. """
+        print(f"[+] 중첩테이블 섹션(C): {sub_section!r}", flush=True)
+        pending_labels: list = []
+
+        for row in rows:
+            ths = await row.query_selector_all("th")
+            tds = await row.query_selector_all("td")
+
+            if ths and not tds:
+                # 라벨 행: th 텍스트 수집
+                pending_labels = [clean_text(await th.inner_text()) for th in ths]
+            elif tds and not ths:
+                # 값 행: pending 라벨과 zip 매핑
+                td_vals = [clean_text(await td.inner_text()) for td in tds]
+                for label, val in zip(pending_labels, td_vals):
+                    if not label:
+                        continue
+                    mapped = get_mapped_key(label, sub_section)
+                    if mapped == label:
+                        continue
+                    for k, v in parse_value(mapped, val).items():
+                        if k not in result or not result[k]:
+                            result[k] = v
+                pending_labels = []  # 소비 후 초기화
+    
+    @staticmethod
+    async def _parse_h4_section_tables(page: Page, selector: str, result: dict):
+        """ [패턴 D] view 영역 내 <h4 class="check">섹션명</h4> + <table> 반복 구조. """
+        try:
+            # selector 내에서 탐색 → 없으면 page 전체 fallback
+            h4_els = await page.query_selector_all(f"{selector} h4.check")
+            if not h4_els:
+                h4_els = await page.query_selector_all("h4.check")
+            if not h4_els:
+                return False
+ 
+            parsed_any = False
+            for h4 in h4_els:
+                h4_text = clean_text(await h4.inner_text())
+                if not h4_text:
+                    continue
+ 
+                # h4 다음 형제 table 탐색 (JS nextElementSibling 순회)
+                tbl = await h4.evaluate_handle("""el => {
+                    let sib = el.nextElementSibling;
+                    while (sib) {
+                        if (sib.tagName === 'TABLE' || sib.querySelector('table')) return sib;
+                        if (['H4','H3','H2'].includes(sib.tagName)) break;
+                        sib = sib.nextElementSibling;
+                    }
+                    return null;
+                }""")
+ 
+                if not tbl or await tbl.evaluate("el => el === null"):
+                    continue
+ 
+                # thead th → 컬럼명 리스트
+                thead_ths = await tbl.query_selector_all("thead th")
+                if not thead_ths:
+                    continue
+                col_names = [clean_text(await th.inner_text()) for th in thead_ths]
+ 
+                # tbody tr → 각 행의 td 값과 컬럼명 zip 매핑
+                for tr in await tbl.query_selector_all("tbody tr"):
+                    tds = await tr.query_selector_all("td")
+                    td_vals = [clean_text(await td.inner_text()) for td in tds]
+ 
+                    for col, val in zip(col_names, td_vals):
+                        if not col or not val:
+                            continue
+                        mapped = get_mapped_key(col, h4_text)
+                        if mapped == col:
+                            continue
+                        for k, v in parse_value(mapped, val).items():
+                            if k not in result or not result[k]:
+                                result[k] = v
+                        parsed_any = True
+ 
+            if parsed_any:
+                print(f"[+] 패턴D(h4+table) 파싱 완료", flush=True)
+            return parsed_any
+ 
+        except Exception as e:
+            print(f"[-] 패턴D 파싱 오류: {e}", flush=True)
+            return False
+        
+    @staticmethod
+    async def _parse_td_rowspan_section_rows(rows, result: dict):
+        """
+        [패턴 E] 중첩 테이블 내 th 없이 td[rowspan]으로 섹션 구분하는 구조.
+        _detect_td_rowspan_section()으로 감지 후 모든 행 순회.
+        발동 조건은 _detect_td_rowspan_section()이 보장하므로 여기선 파싱만 담당.
+        """
+        cur_section: Optional[str] = None
+        rs_counter  = 0
+ 
+        for row in rows:
+            all_tds = await row.query_selector_all("td, dd")
+            if not all_tds:
+                continue
+ 
+            if rs_counter > 0:
+                rs_counter -= 1
+ 
+            # 패턴 E 헤더 행 감지
+            e_result = await UniversalCrawler._detect_td_rowspan_section(all_tds)
+            if e_result:
+                cur_section = e_result["section"]
+                rs_counter  = e_result["rs_counter"]
+                # 이 행의 라벨/값도 처리
+                label, val_el = e_result["label"], e_result["val_el"]
+                if label:
+                    val = clean_text(await val_el.inner_text())
+                    mapped = get_mapped_key(label, cur_section)
+                    if mapped != label:
+                        for k, v in parse_value(mapped, val).items():
+                            if k not in result or not result[k]:
+                                result[k] = v
+                continue
+ 
+            # 일반 데이터 행: all_tds = [라벨td, 값td]
+            if len(all_tds) >= 2 and cur_section:
+                label = clean_text(await all_tds[0].inner_text())
+                val   = clean_text(await all_tds[-1].inner_text())
+                if label:
+                    mapped = get_mapped_key(label, cur_section)
+                    if mapped != label:
+                        for k, v in parse_value(mapped, val).items():
+                            if k not in result or not result[k]:
+                                result[k] = v
 
     @staticmethod
     async def _extract_attachments(td_el, page: Page, base_url: str, is_file: bool, req: "ScrapeRequest" = None, bi_cn: str = "", year: str = "") -> list:
@@ -862,6 +1285,13 @@ async def execute_view_scraping(req: ScrapeRequest):
     list_data, view_data = [], []
     filepath = None
     error_logs = []
+
+    # last_data 가 없으면 None → 기존 전체 수집 동작 그대로 유지
+    last_sig: Optional[Dict[str, str]] = (
+        _build_last_data_signature(req.last_data) if req.last_data else None
+    )
+    if last_sig:
+        print(f"[last_data] 추가수집 모드 활성화. 기준점: {last_sig}", flush=True)
     
     async with async_playwright() as playwright:
         browser, page = await _setup_browser(playwright)
@@ -869,11 +1299,11 @@ async def execute_view_scraping(req: ScrapeRequest):
             # 1단계: 리스트 수집
             print(f"\n{'='*60}", flush=True)
             print(f"[*] [1단계] 리스트 수집 시작: {p.list_url}", flush=True)
-            list_data, collect_errors = await _collect_pages(
+            list_data, collect_errors, last_data_reached = await _collect_pages(
                 page, p.list_url, p.rasmbly_numpr, p.list_class, p.view_id_param,
                 p.max_pages, p.paging_selector, p.next_btn_selector, p.end_btn_selector,
                 UniversalCrawler.extract_list_page, lambda: app.state.stop_scraping,
-                p.search_form_selector, p.numpr_select_selector, p.search_btn_selector,
+                p.search_form_selector, p.numpr_select_selector, p.search_btn_selector, last_sig=last_sig, 
             )
             error_logs.extend(collect_errors)
 
@@ -890,6 +1320,8 @@ async def execute_view_scraping(req: ScrapeRequest):
             total = len(list_data)
             print(f"\n[*] [2단계] 상세 수집 시작 (총 {total}건)", flush=True)
             print(f"{'-'*60}", flush=True)
+
+            detail_last_data_reached = False  # ← [신규] 상세 단계 중단 플래그
 
             for idx, item in enumerate(list_data):
                 # [/stop 요청 감지]
@@ -915,7 +1347,17 @@ async def execute_view_scraping(req: ScrapeRequest):
                     
                     bi_cn  = str(str(time.time_ns())[:16])
                     detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base, req=req, bi_cn=bi_cn)
-                    view_data.append({"view_id": vid, "URL": target_url, "BI_CN": f"CLIKC{bi_cn}", **detail})
+                    collected_item = {"view_id": vid, "URL": target_url, "BI_CN": f"CLIKC{bi_cn}", **detail}
+
+                    # ── [신규] 상세 데이터 기준 last_data 비교 ────────────────
+                    # 리스트 단계에서 걸러지지 않은 경우의 보조 안전망
+                    if last_sig and not last_data_reached and is_last_data_match(collected_item, last_sig):
+                        detail_last_data_reached = True
+                        print(f"[last_data] 상세 단계에서 기준점 도달 → 수집 중단 후 전송", flush=True)
+                        break
+                    # ────────────────────────────────────────────────────────
+
+                    view_data.append(collected_item)
                     
                 except Exception as e:
                     print(f"    [!] ID: {vid} 수집 실패: {e}", flush=True)
@@ -928,7 +1370,19 @@ async def execute_view_scraping(req: ScrapeRequest):
                         "error": str(e)
                     })
 
-            result_block = _build_result(view_data, error_logs, app.state.stop_scraping)
+            is_interrupted = (
+                app.state.stop_scraping
+                or last_data_reached
+                or detail_last_data_reached
+            )
+            # ────────────────────────────────────────────────────────────────
+
+            result_block = _build_result(view_data, error_logs, is_interrupted)
+
+            # ── [신규] last_data 모드일 때 result message 보완 ───────────────
+            if (last_data_reached or detail_last_data_reached) and result_block["status"] in ("SUCCESS", "PARTIAL"):
+                result_block["message"] = "추가수집 완료 (last_data 기준점 도달)"
+            # ────────────────────────────────────────────────────────────────
 
             full_payload = {
                     "reqId":   req.req_id,
@@ -940,6 +1394,7 @@ async def execute_view_scraping(req: ScrapeRequest):
                     "log":     error_logs  # ← 에러 로그 포함
                 }
             
+            view_data.reverse()
             # --- 루프 종료 후 공통 처리 (정상 종료 또는 중단 시 모두 실행) ---
             if view_data or error_logs:
                 if view_data:
@@ -968,7 +1423,8 @@ async def execute_view_scraping(req: ScrapeRequest):
                 "crw_id": req.crw_id, 
                 "file_dir": req.file_dir,
                 "ok": True, 
-                "interrupted": app.state.stop_scraping,
+                "interrupted": is_interrupted,
+                "last_data_reached": last_data_reached or detail_last_data_reached,  # ← [신규]
                 "data_count": len(view_data), 
                 "saved_file": filepath
             }
@@ -1085,6 +1541,7 @@ async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
                     print(f"[TEST] 상세 수집 실패: {e}", flush=True)
                     view_data.append({"view_id": vid, "view_url": target_url, "view_error": str(e)})
 
+            view_data.reverse()
             return {
                 "req_id": req.req_id,
                 "type": req.type,
@@ -1115,11 +1572,3 @@ async def handle_test_request(req: ScrapeRequest):
         "file_dir": req.file_dir,
         "ok": True
     }
-    
-# --- API 엔드포인트 ---
-@app.get("/crawl/stop")
-async def api_stop():
-    """크롤링 루프 즉시 중단"""
-    app.state.stop_scraping = True
-    print("[!] 외부 중단 요청 수신", flush=True)
-    return {"ok": True, "message": "Stop requested. Current process will halt and save progress."} 

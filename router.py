@@ -27,7 +27,14 @@ from five_mins_free_spch import (
     run_spch_all_and_callback,
 )
 
-from crawl_status import create_job, get_job, set_job_running, set_job_done, set_job_failed
+from policy import (
+    app as policy_app, 
+    PolicyRequest,
+    execute_policy_scraping,
+    execute_policy_scraping_test as policy_test,
+)
+
+from crawl_status import create_job, get_job, set_job_running, set_job_done, set_job_failed, task_manager
 
 
 
@@ -63,6 +70,14 @@ async def run_spch_job(req_obj):
     except Exception:
         await set_job_failed(req_obj.req_id)
 
+async def run_policy_job(req_obj):
+    try:
+        await set_job_running(req_obj.req_id)
+        await execute_policy_scraping(req_obj)
+        await set_job_done(req_obj.req_id)
+    except Exception:
+        await set_job_failed(req_obj.req_id)
+
 def handle_validation_error(e: ValidationError):
     # 4. Pydantic에서 던지는 ValidationError를 가공하여 응답
     errors = e.errors()
@@ -88,7 +103,7 @@ async def health():
 	return {"status": "ok"}
 
 @router.post("/crawl")
-async def integrated_crawl_api(request: Request, background_tasks: BackgroundTasks):
+async def integrated_crawl_api(request: Request):
     # 1. 원본 데이터 로드
     try:
         json_data = await request.json()
@@ -106,24 +121,32 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
         if "bill" in req_type:
             req_obj = ScrapeRequest(**json_data)  # 여기서 Pydantic 검증 발생
             await create_job(req_obj.req_id)
-            background_tasks.add_task(run_bill_job, req_obj)
+            accepted = await task_manager.submit(run_bill_job, req_obj)
             
         elif "minutes" in req_type:
             raw = CrawlRequest(**json_data)
             req_obj = parse_crawl_request(raw)
             await create_job(req_obj.req_id)
-            background_tasks.add_task(run_minutes_job, req_obj)
+            accepted = await task_manager.submit(run_minutes_job, req_obj)
         
         elif "free5min" in req_type:
             req_obj = SpchCrawlRequest(**json_data)
             await create_job(req_obj.req_id)
-            background_tasks.add_task(run_spch_job, req_obj)
+            accepted = await task_manager.submit(run_spch_job, req_obj)
+
+        elif "policy" in req_type:
+            req_obj = PolicyRequest(**json_data)
+            await create_job(req_obj.req_id)
+            accepted = await task_manager.submit(run_policy_job, req_obj)
             
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type입니다: {req_type}"})
 
     except ValidationError as e:
         return handle_validation_error(e)
+    
+    if not accepted:
+        return JSONResponse(status_code=200, content={"ok": False, "message": "대기 큐가 가득 찼습니다. 잠시 후 다시 시도해주세요."})
 
     # 5. 정상 시작 응답
     return {
@@ -162,6 +185,10 @@ async def integrated_crawl_test_api(request: Request):
             req_obj = SpchCrawlRequest(**json_data)
             crawl_response = await crawl_spch_regex_check(req_obj, crawl_all=False)
             return build_spch_callback_payload(req_obj, crawl_response)
+        
+        elif req_type == "policy":
+            req_obj = PolicyRequest(**json_data)
+            return await policy_test(req_obj)
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type입니다: {req_type}"})
@@ -198,3 +225,25 @@ async def insert_api(payload: dict):
 		json.dump(payload, f, ensure_ascii=False, indent=2)
 	
 	return {"result": "ok"}
+
+@router.get("/crawl/stop")
+async def integrated_crawl_stop():
+    """수집 태스크 통합 중단."""
+    stopped = []
+ 
+    # ── bill 중단 ────────────────────────────────────────────────────────────
+    if not bill_app.state.stop_scraping:
+        bill_app.state.stop_scraping = True
+        stopped.append("bill")
+        print("[!] [bill] stop_scraping = True", flush=True)
+ 
+    # ── policy 중단 ──────────────────────────────────────────────────────────
+    if getattr(policy_app.state, "current_stop_event", None):
+        policy_app.state.current_stop_event.set()
+        stopped.append("policy")
+        print("[!] [policy] stop_event.set()", flush=True)
+ 
+    if stopped:
+        return {"ok": True, "stopped": stopped, "message": f"{stopped} 중단 요청 완료. 현재 수집 건 완료 후 중단됩니다."}
+ 
+    return {"ok": True, "stopped": [], "message": "실행 중인 수집 태스크가 없습니다."}
