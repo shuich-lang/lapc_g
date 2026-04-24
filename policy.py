@@ -947,13 +947,3 @@ async def handle_policy_request(req: PolicyRequest, background_tasks: Background
                 "file_dir": req.file_dir, "ok": True, "message": "수집 요청 완료"}
     except Exception as e:
         return error_response(f"요청 처리 중 오류: {str(e)}")
-
-@app.get("/crawl/stop")
-async def api_stop():
-    # 실행 중인 태스크의 이벤트를 set() → await 체인 어디서든 다음 체크 시 즉시 탈출
-    if app.state.current_stop_event:
-        app.state.current_stop_event.set()
-        print("[!] 외부 중단 요청 수신 → stop_event.set()", flush=True)
-        return {"ok": True, "message": "Stop requested. 현재 수집 건 완료 후 중단됩니다."}
-    print("[!] 외부 중단 요청 수신 (실행 중인 태스크 없음)", flush=True)
-    return {"ok": True, "message": "실행 중인 수집 태스크가 없습니다."}

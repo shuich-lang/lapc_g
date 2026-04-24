@@ -63,7 +63,7 @@ _CMIT_FIELDS = {
 
 # 본회의 섹션 공통 필드
 _PLNMT_FIELDS = {
-    "접수일": "PLNMT_FRWRD_DE", "접수일자": "PLNMT_FRWRD_DE",
+    "접수일": "PLNMT_FRWRD_DE", "접수일자": "PLNMT_FRWRD_DE", "제안일": "PLNMT_FRWRD_DE", "제안일자": "PLNMT_FRWRD_DE",
     "회부일": "PLNMT_FRWRD_DE", "회부일자": "PLNMT_FRWRD_DE",
     "보고일": "PLNMT_REPORT_DE", "보고일자": "PLNMT_REPORT_DE",
     "본회의 보고일": "PLNMT_REPORT_DE", "심사보고일": "PLNMT_REPORT_DE",
@@ -79,10 +79,10 @@ _PLNMT_FIELDS = {
 
 # 섹션 이름 변형 -> 공통 템플릿 매핑 (사이트별 섹션명 차이 흡수)
 SECTION_FIELD_MAP = {k: _CMIT_FIELDS for k in [
-    "위원회", "위원회 처리사항", "위원회처리사항", "위원회 처리", "위원회처리",
+    "위원회", "위원회 처리사항", "위원회처리사항", "위원회 처리", "위원회처리", "소관위원회사항", "소관위사항", "위 원 회 처 리",
     "소관위원회 심사경과", "소관위원회 처리결과", "위원회<br>처리사항", "위 원 회<br>처리사항", "위 원 회 처리사항",
 ]}
 SECTION_FIELD_MAP.update({k: _PLNMT_FIELDS for k in [
-    "본회의", "본회의 처리사항", "본회의처리사항", "본회의 처리", "본회의 심사경과",
+    "본회의", "본회의 처리사항", "본회의처리사항", "본회의 처리", "본회의 심사경과", "본회의사항", "본회의 (최종상황)", "본 회 의 의 결",
     "본회의<br>(최종상황)", "본회의 처리결과", "본회의<br>처리사항", "본 회 의<br>처리사항", "본 회 의 처리사항",
 ]})

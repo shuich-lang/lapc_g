@@ -28,6 +28,7 @@ from five_mins_free_spch import (
 )
 
 from policy import (
+    app as policy_app, 
     PolicyRequest,
     execute_policy_scraping,
     execute_policy_scraping_test as policy_test,
@@ -221,3 +222,25 @@ async def insert_api(payload: dict):
 		json.dump(payload, f, ensure_ascii=False, indent=2)
 	
 	return {"result": "ok"}
+
+@router.get("/crawl/stop")
+async def integrated_crawl_stop():
+    """수집 태스크 통합 중단."""
+    stopped = []
+ 
+    # ── bill 중단 ────────────────────────────────────────────────────────────
+    if not bill_app.state.stop_scraping:
+        bill_app.state.stop_scraping = True
+        stopped.append("bill")
+        print("[!] [bill] stop_scraping = True", flush=True)
+ 
+    # ── policy 중단 ──────────────────────────────────────────────────────────
+    if getattr(policy_app.state, "current_stop_event", None):
+        policy_app.state.current_stop_event.set()
+        stopped.append("policy")
+        print("[!] [policy] stop_event.set()", flush=True)
+ 
+    if stopped:
+        return {"ok": True, "stopped": stopped, "message": f"{stopped} 중단 요청 완료. 현재 수집 건 완료 후 중단됩니다."}
+ 
+    return {"ok": True, "stopped": [], "message": "실행 중인 수집 태스크가 없습니다."}

@@ -17,7 +17,7 @@ import os
 
 import certifi
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from uuid import uuid4
 from pydantic import BaseModel, Field, HttpUrl
@@ -40,9 +40,9 @@ USER_AGENT = (
 
 # CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"		# 개발서버 cms (도커 외부에서 접근용)
 # CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 개발서버 cms (도커 내부에서 접근용)
-CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
+# CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
 # CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
-# CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"		# 국회 cms
+CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"		# 국회 cms
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
 
@@ -74,6 +74,7 @@ class CrawlRequest(BaseModel):
 	req_id: str = Field(..., description="날짜 포맷: yyyyMMddHHmmssSSSSSS")
 	crw_id: Optional[str] = Field(None, description="수집 설정 구분값")
 	type: str = Field(..., description="수집 유형: minutes, bill 등")
+	last_data: Optional[dict[str, Optional[str]]] = Field(None, description="현재까지 수집된 가장 최근의 데이터. 추가수집 시 들어오는 값.")
 	file_dir: str = Field("", description="파일 저장 절대 경로")
 	param: dict = Field(..., description="type별 크롤링 파라미터")
 	item: list[RegexItem] = Field(default_factory=list, description="동적으로 추출할 항목 목록")
@@ -83,6 +84,7 @@ class RegexCrawlRequest(BaseModel):
 	req_id: str = Field(...)
 	crw_id: Optional[str] = Field(None)
 	type: str = Field(...)
+	last_data: Optional[dict[str, Optional[str]]] = Field(None)
 	file_dir: str = Field("")
 	param: MinutesParam = Field(...)
 	item: list[RegexItem] = Field(default_factory=list)
@@ -491,11 +493,8 @@ def build_file_save_path(
 def build_minutes_callback_payload(
 	request: RegexCrawlRequest,
 	crawl_response: CrawlResponse,
-	error_logs: list | None = None,
-	error: str = "",
 ) -> dict:
 	data = []
-	_error_logs = error_logs or []
 
 	for item in crawl_response.items:
 		if item.fields:
@@ -504,15 +503,13 @@ def build_minutes_callback_payload(
 			row["mints_cn"] = item.mints_cn
 			data.append(row)
 	
-	result_block = _build_result(data, _error_logs, error=error)
+	data.reverse()
 
 	return {
 		"req_id": request.req_id,
 		"type": request.type,
 		"crw_id": request.crw_id,
-		"result": result_block,
 		"data": data,
-		"log": _error_logs,
 	}
 
 
@@ -534,6 +531,7 @@ def parse_crawl_request(raw: CrawlRequest):
 			req_id=raw.req_id,
 			crw_id=raw.crw_id,
 			type=raw.type,
+			last_data=raw.last_data,
 			file_dir=raw.file_dir,
 			param=MinutesParam(**raw.param),
 			item=raw.item,
@@ -545,31 +543,37 @@ def parse_crawl_request(raw: CrawlRequest):
 
 	raise HTTPException(status_code=400, detail=f"지원하지 않는 type입니다: {raw.type}")
 
+def matches_last_data(
+	item_fields: dict[str, Optional[str]],
+	item_detail_url: Optional[str],
+	item_mints_cn: Optional[str],
+	last_data: dict[str, Optional[str]],
+) -> bool:
+	"""수집된 아이템이 last_data와 일치하는지 동적 비교.
+	last_data의 모든 key-value가 수집 아이템의 필드에 일치하면 매칭."""
+	if not last_data:
+		return False
 
-def _build_result(data_list: list, error_logs: list, error: str = "") -> dict:
-    """수집 결과 상태 자동 판별 (bill.py 스펙 호환)"""
-    has_timeout = any("Timeout" in (e.get("note") or "") for e in error_logs)
-    has_error = len(error_logs) > 0
-    data_count = len(data_list)
+	# build_minutes_callback_payload에서 url, mints_cn도 row에 포함하므로
+	# 비교 시에도 동일한 기준으로 구성
+	compare_source = dict(item_fields) if item_fields else {}
+	if item_detail_url is not None:
+		compare_source["url"] = item_detail_url
+	if item_mints_cn is not None:
+		compare_source["mints_cn"] = item_mints_cn
 
-    if error:
-        status, code, message = "FAILED", "500", f"수집 실패: {error}"
-    elif data_count == 0 and has_timeout:
-        status, code, message = "TIMEOUT", "408", "타임아웃으로 수집 불가"
-    elif data_count == 0:
-        status, code, message = "EMPTY", "204", "수집 결과 없음"
-    elif has_timeout or has_error:
-        status, code, message = "PARTIAL", "206", "일부 수집 완료 (오류 포함)"
-    else:
-        status, code, message = "SUCCESS", "200", "수집 완료"
+	for key, expected in last_data.items():
+		actual = compare_source.get(key)
 
-    return {
-        "status": status,
-        "code": code,
-        "message": message,
-        "dataCount": data_count,
-        "interrupted": False,  # 회의록은 중단 API 미지원 → 항상 False
-    }
+		expected_norm = normalize_text(str(expected)) if expected else ""
+		actual_norm = normalize_text(str(actual)) if actual else ""
+
+		if expected_norm != actual_norm:
+			print(f"[MATCH] 불일치 key={key}")
+			return False
+
+	print("[MATCH] last_data 완전 일치!")
+	return True
 
 
 # =========================
@@ -1098,7 +1102,6 @@ async def build_minutes_item_by_dynamic_regex(
 	candidate: dict,
 	rank_index_in_page: int,
 	final_rank: int,
-	error_logs: list[dict] | None = None,
 ) -> MinutesItem:
 	title = candidate["title"]
 	href = candidate["href"]
@@ -1187,15 +1190,7 @@ async def build_minutes_item_by_dynamic_regex(
 			parsed["ORGINL_FILE_URL"] = None
 			parsed["MINTS_FILE_PATH"] = None
 			parsed["ORGINL_FILE_NM"] = None
-			fail_msg = f"첨부파일 다운로드 실패: {type(exc).__name__}: {str(exc)}"
-			note = f"{note} / {fail_msg}" if note else fail_msg
-			if error_logs is not None:
-				error_logs.append({
-					"step": "파일 다운로드",
-					"title": title,
-					"file_url": file_value,
-					"error": fail_msg,
-				})
+			note = f"{note} / 첨부파일 다운로드 실패: {type(exc).__name__}" if note else f"첨부파일 다운로드 실패: {type(exc).__name__}"
 		
 	parsed["RASMBLY_NUMPR"] = rasmbly_numpr
 
@@ -1407,35 +1402,13 @@ def _build_selector_from_a_tag(a_tag_html: str) -> str:
 
 
 async def run_minutes_all_and_callback(request: RegexCrawlRequest) -> None:
-	error_logs: list[dict] = []
-	crawl_response: Optional[CrawlResponse] = None
-
 	try:
-		crawl_response = await crawl_minutes_regex_check(request, crawl_all=True, error_logs=error_logs)
-		payload = build_minutes_callback_payload(request, crawl_response, error_logs=error_logs)
+		crawl_response = await crawl_minutes_regex_check(request, crawl_all=True)
+		payload = build_minutes_callback_payload(request, crawl_response)
+		await post_minutes_callback(payload)
 	except Exception as exc:
 		traceback.print_exc()
-		
-		# 실패 시에도 CMS에 콜백은 보내야 하므로 에러 정보를 담은 payload 생성
-		if crawl_response is None:
-			crawl_response = CrawlResponse(
-				list_url=str(request.param.list_url),
-				item_count=0,
-				items=[],
-			)
-		error_logs.append({
-			"step": "run_minutes_all_and_callback",
-			"error": f"{type(exc).__name__}: {str(exc)}",
-		})
-		payload = build_minutes_callback_payload(
-			request, crawl_response, error_logs=error_logs, error=str(exc)
-		)
-
-	try:
-		await post_minutes_callback(payload)
-	except Exception as cb_exc:
-		print(f"[CALLBACK] 콜백 전송 실패: {cb_exc}")
-		traceback.print_exc()
+		raise
 
 
 # =========================
@@ -1445,40 +1418,33 @@ async def run_minutes_all_and_callback(request: RegexCrawlRequest) -> None:
 async def crawl_minutes_regex_check(
 	request: RegexCrawlRequest,
 	crawl_all: bool = False,
-	error_logs: list[dict] | None = None,
 ) -> CrawlResponse:
-	if error_logs is None:
-		error_logs = []
-	
 	if not request.item:
-		error_logs.append({
-			"step": "파라미터 검증",
-			"error": "item은 최소 1개 이상이어야 합니다.",
-		})
-		return CrawlResponse(
-			list_url=str(request.param.list_url),
-			item_count=0,
-			items=[],
-		)
+		raise HTTPException(status_code=400, detail="item은 최소 1개 이상이어야 합니다.")
+	
+	# 추가 수집인가? (last_data가 존재하는가)
+	is_additional = bool(request.last_data)
 
 	try:
-		list_pages = await build_list_pages(request, crawl_all=crawl_all)
+		if is_additional:
+			print("[CRAWL] 추가 수집 모드 활성화: last_data 존재")
+			list_pages = await build_list_pages(request, crawl_all=False)
+		else:
+			list_pages = await build_list_pages(request, crawl_all=crawl_all)
 	except Exception as exc:
-		error_logs.append({
-			"step": "목록 페이지 요청",
-			"url": str(request.param.list_url),
-			"error": f"{type(exc).__name__}: {str(exc)}",
-		})
-		return CrawlResponse(
-			list_url=str(request.param.list_url),
-			item_count=0,
-			items=[],
-		)
+		raise HTTPException(
+			status_code=400,
+			detail=f"목록 페이지 요청 실패: {type(exc).__name__} / {str(exc)}",
+		) from exc
 
 	all_items: list[MinutesItem] = []
 	seen_keys: set[str] = set()
+	is_last_data_matched = False
 
 	for page_idx, (page_url, page_html) in enumerate(list_pages, start=1):
+		if is_last_data_matched:
+			break
+
 		print(f"[CRAWL] ===== {page_idx} 페이지 처리 중 ===== URL: {page_url}")
 
 		candidates = extract_list_candidates(
@@ -1486,7 +1452,7 @@ async def crawl_minutes_regex_check(
 			list_root_selector=request.param.list_root_selector,
 			item_selector=request.param.item_selector,
 			target_selector=request.param.target_selector,
-			limit=None if crawl_all else max(1, request.param.skip_top_count + 1),
+			limit=None if (crawl_all or is_additional) else max(1, request.param.skip_top_count + 1),
 		)
 
 		if not candidates:
@@ -1511,33 +1477,10 @@ async def crawl_minutes_regex_check(
 					candidate=candidate,
 					rank_index_in_page=idx - 1,
 					final_rank=current_rank,
-					error_logs=error_logs,
 				)
 			except ValueError as exc:
-				error_logs.append({
-					"step": f"상세수집_{page_idx}p_{idx}",
-					"title": candidate.get("title", ""),
-					"error": str(exc)
-				})
-				item = MinutesItem(
-					rank=len(all_items) + 1,
-					list_title=candidate["title"],
-					detail_url=None,
-					access_method="error",
-					open_type=None,
-					detail_access_success=False,
-					fields={},
-					uid=None,
-					raw_href=candidate.get("href"),
-					raw_onclick=candidate.get("onclick"),
-					note=f"상세 처리 실패: {str(exc)}",
-				)
+				raise HTTPException(status_code=400, detail=str(exc)) from exc
 			except Exception as exc:
-				error_logs.append({
-					"step": f"상세수집_{page_idx}p_{idx}",
-					"title": candidate.get("title", ""),
-					"error": f"{type(exc).__name__}: {str(exc)}",
-				})
 				item = MinutesItem(
 					rank=len(all_items) + 1,
 					list_title=candidate["title"],
@@ -1552,6 +1495,17 @@ async def crawl_minutes_regex_check(
 					note=f"상세 처리 실패: {type(exc).__name__}",
 				)
 
+			# 추가수집일 때:  last_data와 일치하면 수집 중단
+			if is_additional and matches_last_data(
+				item_fields=item.fields,
+				item_detail_url=item.detail_url,
+				item_mints_cn=item.mints_cn,
+				last_data=request.last_data,
+			):
+				print(f"[CRAWL] last_data 일치 — 추가수집 종료 (rank: {current_rank}, 제목: {item.list_title})")
+				is_last_data_matched = True
+				break
+
 			dedupe_key = item.uid or item.detail_url or f"{item.list_title}|{item.raw_href}|{item.raw_onclick}"
 			if crawl_all and dedupe_key in seen_keys:
 				continue
@@ -1559,13 +1513,21 @@ async def crawl_minutes_regex_check(
 			seen_keys.add(dedupe_key)
 			item.rank = len(all_items) + 1
 			all_items.append(item)
+	
+	# 추가수집인데 신규 데이터가 없는 경우 — 정상 응답 (에러 아님)
+	if is_additional and not all_items:
+		print("[CRAWL] 추가수집: 신규 데이터 없음")
+		return CrawlResponse(
+			list_url=str(request.param.list_url),
+			item_count=0,
+			items=[],
+		)
 
 	if not all_items:
-		error_logs.append({
-			"step": "목록 수집 결과",
-			"url": str(request.param.list_url),
-			"error": "지정한 selector 기준으로 목록 item 또는 target을 찾지 못했습니다.",
-		})
+		raise HTTPException(
+			status_code=422,
+			detail="지정한 selector 기준으로 목록 item 또는 target을 찾지 못했습니다.",
+		)
 
 	return CrawlResponse(
 		list_url=str(request.param.list_url),
