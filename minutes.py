@@ -74,6 +74,7 @@ class CrawlRequest(BaseModel):
 	req_id: str = Field(..., description="날짜 포맷: yyyyMMddHHmmssSSSSSS")
 	crw_id: Optional[str] = Field(None, description="수집 설정 구분값")
 	type: str = Field(..., description="수집 유형: minutes, bill 등")
+	last_data: Optional[dict[str, Optional[str]]] = Field(None, description="현재까지 수집된 가장 최근의 데이터. 추가수집 시 들어오는 값.")
 	file_dir: str = Field("", description="파일 저장 절대 경로")
 	param: dict = Field(..., description="type별 크롤링 파라미터")
 	item: list[RegexItem] = Field(default_factory=list, description="동적으로 추출할 항목 목록")
@@ -83,6 +84,7 @@ class RegexCrawlRequest(BaseModel):
 	req_id: str = Field(...)
 	crw_id: Optional[str] = Field(None)
 	type: str = Field(...)
+	last_data: Optional[dict[str, Optional[str]]] = Field(None)
 	file_dir: str = Field("")
 	param: MinutesParam = Field(...)
 	item: list[RegexItem] = Field(default_factory=list)
@@ -529,6 +531,7 @@ def parse_crawl_request(raw: CrawlRequest):
 			req_id=raw.req_id,
 			crw_id=raw.crw_id,
 			type=raw.type,
+			last_data=raw.last_data,
 			file_dir=raw.file_dir,
 			param=MinutesParam(**raw.param),
 			item=raw.item,
@@ -539,6 +542,38 @@ def parse_crawl_request(raw: CrawlRequest):
 	#     return BillCrawlRequest(...)
 
 	raise HTTPException(status_code=400, detail=f"지원하지 않는 type입니다: {raw.type}")
+
+def matches_last_data(
+	item_fields: dict[str, Optional[str]],
+	item_detail_url: Optional[str],
+	item_mints_cn: Optional[str],
+	last_data: dict[str, Optional[str]],
+) -> bool:
+	"""수집된 아이템이 last_data와 일치하는지 동적 비교.
+	last_data의 모든 key-value가 수집 아이템의 필드에 일치하면 매칭."""
+	if not last_data:
+		return False
+
+	# build_minutes_callback_payload에서 url, mints_cn도 row에 포함하므로
+	# 비교 시에도 동일한 기준으로 구성
+	compare_source = dict(item_fields) if item_fields else {}
+	if item_detail_url is not None:
+		compare_source["url"] = item_detail_url
+	if item_mints_cn is not None:
+		compare_source["mints_cn"] = item_mints_cn
+
+	for key, expected in last_data.items():
+		actual = compare_source.get(key)
+
+		expected_norm = normalize_text(str(expected)) if expected else ""
+		actual_norm = normalize_text(str(actual)) if actual else ""
+
+		if expected_norm != actual_norm:
+			print(f"[MATCH] 불일치 key={key}")
+			return False
+
+	print("[MATCH] last_data 완전 일치!")
+	return True
 
 
 # =========================
@@ -1386,9 +1421,16 @@ async def crawl_minutes_regex_check(
 ) -> CrawlResponse:
 	if not request.item:
 		raise HTTPException(status_code=400, detail="item은 최소 1개 이상이어야 합니다.")
+	
+	# 추가 수집인가? (last_data가 존재하는가)
+	is_additional = bool(request.last_data)
 
 	try:
-		list_pages = await build_list_pages(request, crawl_all=crawl_all)
+		if is_additional:
+			print("[CRAWL] 추가 수집 모드 활성화: last_data 존재")
+			list_pages = await build_list_pages(request, crawl_all=False)
+		else:
+			list_pages = await build_list_pages(request, crawl_all=crawl_all)
 	except Exception as exc:
 		raise HTTPException(
 			status_code=400,
@@ -1397,8 +1439,12 @@ async def crawl_minutes_regex_check(
 
 	all_items: list[MinutesItem] = []
 	seen_keys: set[str] = set()
+	is_last_data_matched = False
 
 	for page_idx, (page_url, page_html) in enumerate(list_pages, start=1):
+		if is_last_data_matched:
+			break
+
 		print(f"[CRAWL] ===== {page_idx} 페이지 처리 중 ===== URL: {page_url}")
 
 		candidates = extract_list_candidates(
@@ -1406,7 +1452,7 @@ async def crawl_minutes_regex_check(
 			list_root_selector=request.param.list_root_selector,
 			item_selector=request.param.item_selector,
 			target_selector=request.param.target_selector,
-			limit=None if crawl_all else max(1, request.param.skip_top_count + 1),
+			limit=None if (crawl_all or is_additional) else max(1, request.param.skip_top_count + 1),
 		)
 
 		if not candidates:
@@ -1449,6 +1495,17 @@ async def crawl_minutes_regex_check(
 					note=f"상세 처리 실패: {type(exc).__name__}",
 				)
 
+			# 추가수집일 때:  last_data와 일치하면 수집 중단
+			if is_additional and matches_last_data(
+				item_fields=item.fields,
+				item_detail_url=item.detail_url,
+				item_mints_cn=item.mints_cn,
+				last_data=request.last_data,
+			):
+				print(f"[CRAWL] last_data 일치 — 추가수집 종료 (rank: {current_rank}, 제목: {item.list_title})")
+				is_last_data_matched = True
+				break
+
 			dedupe_key = item.uid or item.detail_url or f"{item.list_title}|{item.raw_href}|{item.raw_onclick}"
 			if crawl_all and dedupe_key in seen_keys:
 				continue
@@ -1456,6 +1513,15 @@ async def crawl_minutes_regex_check(
 			seen_keys.add(dedupe_key)
 			item.rank = len(all_items) + 1
 			all_items.append(item)
+	
+	# 추가수집인데 신규 데이터가 없는 경우 — 정상 응답 (에러 아님)
+	if is_additional and not all_items:
+		print("[CRAWL] 추가수집: 신규 데이터 없음")
+		return CrawlResponse(
+			list_url=str(request.param.list_url),
+			item_count=0,
+			items=[],
+		)
 
 	if not all_items:
 		raise HTTPException(
