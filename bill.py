@@ -666,11 +666,19 @@ class UniversalCrawler:
         _h4_tables_parsed = await UniversalCrawler._parse_h4_section_tables(
             page, selector, result
         )
+
+        # ── [패턴 F 조기 감지] div 안에 thead 섹션헤더+td행 교대 table이 있는 구조
+        # table이 td 안이 아닌 div 안에 있어서 _parse_nested_section_tables 호출 조건 미달
+        # → page 전체에서 thead th[colspan] 보유 table을 탐색해 선처리
+        _billin_tables_parsed = await UniversalCrawler._parse_billin_tables(
+            page, selector, result
+        )
+
         if _h4_tables_parsed:
             # h4+table 구조에서 처리된 경우 rows 루프 skip → 아래 보완 로직만 실행
             rows = []
         else:
-            rows = await page.query_selector_all(f"{selector} tbody > tr, {selector} > li, {selector} .view_row")
+            rows = await page.query_selector_all(f"{selector} tbody > tr, {selector} ul > li, {selector} > li, {selector} .view_row")
 
         for row in rows:
             try:
@@ -841,6 +849,7 @@ class UniversalCrawler:
         [패턴 C] 제주시의회         — 섹션헤더: thead, 데이터: th행(라벨)/td행(값) 교대
         [패턴 D] 경상북도의회 -  view 영역 내 <h4 class="check">섹션명</h4> + <table> 반복 구조.
         [패턴 E] 경산시의회 - 내 th 없이 td[rowspan]으로 섹션 구분하는 구조.
+        [패턴 F] 서울특별시의회 - thead 섹션헤더 있고, tbody가 td행(라벨)/td행(값) 교대 구조.
 
         하드코딩 없이 SECTION_FIELD_MAP + FIELD_MAP 위임.
         """
@@ -999,6 +1008,7 @@ class UniversalCrawler:
     @staticmethod
     async def _parse_h4_section_tables(page: Page, selector: str, result: dict):
         """ [패턴 D] view 영역 내 <h4 class="check">섹션명</h4> + <table> 반복 구조. """
+        # print(f"[+] 중첩테이블 섹션(D)", flush=True)
         try:
             # selector 내에서 탐색 → 없으면 page 전체 fallback
             h4_els = await page.query_selector_all(f"{selector} h4.check")
@@ -1064,6 +1074,7 @@ class UniversalCrawler:
         _detect_td_rowspan_section()으로 감지 후 모든 행 순회.
         발동 조건은 _detect_td_rowspan_section()이 보장하므로 여기선 파싱만 담당.
         """
+        print(f"[+] 중첩테이블 섹션(E)", flush=True)
         cur_section: Optional[str] = None
         rs_counter  = 0
  
@@ -1101,6 +1112,122 @@ class UniversalCrawler:
                         for k, v in parse_value(mapped, val).items():
                             if k not in result or not result[k]:
                                 result[k] = v
+
+    @staticmethod
+    async def _parse_billin_tables(page: Page, selector: str, result: dict) -> bool:
+        """
+        [패턴 F 선처리] div 안에 섹션헤더+table이 나열된 구조.
+        table이 td가 아닌 div 안에 있어서 _parse_nested_section_tables 미발동되는 경우.
+        """
+        try:
+            tables = await page.query_selector_all(f"{selector} table")
+            if not tables:
+                return False
+ 
+            parsed_any = False
+ 
+            # ── 패턴 F: thead>th 섹션헤더 + tbody td행/td행 교대 ────────────
+            for tbl in tables:
+                thead_th = await tbl.query_selector("thead th")
+                if not thead_th:
+                    continue
+ 
+                thead_section = clean_text(await thead_th.inner_text())
+                if not thead_section:
+                    continue
+ 
+                rows = await tbl.query_selector_all("tbody > tr")
+                if not rows:
+                    continue
+ 
+                # 첫 행이 td만 있고 th 없어야 패턴 F
+                first_ths = await rows[0].query_selector_all("th")
+                first_tds = await rows[0].query_selector_all("td")
+                if first_ths or not first_tds:
+                    continue
+ 
+                await UniversalCrawler._parse_td_label_value_rows_f(
+                    rows, result, thead_section
+                )
+                parsed_any = True
+ 
+            # p 태그 안의 strong 텍스트가 섹션명 역할
+            strong_els = await page.query_selector_all(f"{selector} p > strong, {selector} p > b")
+            for strong in strong_els:
+                section_text = clean_text(await strong.inner_text())
+                if not section_text:
+                    continue
+ 
+                # 섹션명 가드: 위원회/본회의 계열 단어 포함 여부
+                t = section_text.replace(" ", "")
+                if not any(k in t for k in ("위원회", "심사경과", "본회의", "처리사항", "의결")):
+                    continue
+ 
+                # p 다음 형제 div > table 탐색
+                tbl = await strong.evaluate_handle("""el => {
+                    let sib = el.closest('p')?.nextElementSibling;
+                    while (sib) {
+                        const tbl = sib.tagName === 'TABLE' ? sib : sib.querySelector('table');
+                        if (tbl) return tbl;
+                        if (['P','H2','H3','H4'].includes(sib.tagName)) break;
+                        sib = sib.nextElementSibling;
+                    }
+                    return null;
+                }""")
+ 
+                if not tbl or await tbl.evaluate("el => el === null"):
+                    continue
+ 
+                rows = await tbl.query_selector_all("tbody > tr, tr")
+                if not rows:
+                    continue
+ 
+                # 패턴 C 구조 (첫 행 th행 = 컬럼명, 다음 행 td행 = 값)
+                await UniversalCrawler._parse_label_value_rows_c(
+                    rows, result, section_text
+                )
+                parsed_any = True
+ 
+            if parsed_any:
+                print(f"[+] 패턴F 파싱 완료", flush=True)
+            return parsed_any
+ 
+        except Exception as e:
+            print(f"[-] 패턴F 파싱 오류: {e}", flush=True)
+            return False
+        
+    @staticmethod
+    async def _parse_td_label_value_rows_f(rows, result: dict, sub_section: Optional[str]):
+        """
+        [패턴 F] thead 섹션헤더 있고, tbody가 td행(라벨)/td행(값) 교대 구조.
+        서울특별시의회처럼 th 없이 class="tdth"(라벨행) / class="tdtd"(값행) 패턴.
+        """
+        print(f"[+] 중첩테이블 섹션(F): {sub_section!r}", flush=True)
+        pending_labels: list = []
+ 
+        for row in rows:
+            row_cls = (await row.get_attribute("class") or "").lower()
+            tds     = await row.query_selector_all("td")
+            if not tds:
+                continue
+ 
+            td_texts = [clean_text(await td.inner_text()) for td in tds]
+ 
+            # tr class에 "th" 계열 → 라벨 행
+            if "th" in row_cls:
+                pending_labels = td_texts
+            # tr class에 "td" 계열 또는 pending 있으면 값 행
+            elif "td" in row_cls or pending_labels:
+                for label, val in zip(pending_labels, td_texts):
+                    if not label:
+                        continue
+                    mapped = get_mapped_key(label, sub_section)
+                    if mapped == label:
+                        continue
+                    for k, v in parse_value(mapped, val).items():
+                        if k not in result or not result[k]:
+                            result[k] = v
+                pending_labels = []
 
     @staticmethod
     async def _extract_attachments(td_el, page: Page, base_url: str, is_file: bool, req: "ScrapeRequest" = None, bi_cn: str = "", year: str = "") -> list:
