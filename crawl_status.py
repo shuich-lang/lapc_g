@@ -93,4 +93,4 @@ class TaskManager:
             }
 
 # 싱글톤 — 필요 시 환경변수 등으로 값 조정
-task_manager = TaskManager(max_concurrency=3, max_queue_size=50)
+task_manager = TaskManager(max_concurrency=5, max_queue_size=100)
