@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from uuid import uuid4
 from pydantic import BaseModel, Field, HttpUrl
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from datetime import datetime
 
 import traceback
 
@@ -172,18 +173,6 @@ def normalize_date_to_yyyymmdd(value: Optional[str]) -> Optional[str]:
 
 	# 변환 실패 시 원본 반환
 	return text
-
-
-def extract_year_from_date(date_str: Optional[str]) -> str:
-	"""yyyyMMdd 또는 다양한 날짜 형식에서 연도(yyyy)를 추출. 실패 시 '0000' 반환"""
-	if not date_str:
-		return "0000"
-
-	normalized = normalize_date_to_yyyymmdd(date_str)
-	if normalized and len(normalized) >= 4 and normalized[:4].isdigit():
-		return normalized[:4]
-
-	return "0000"
 
 
 def safe_select_one(element, selector: str):
@@ -1164,8 +1153,8 @@ async def build_minutes_item_by_dynamic_regex(
 				base_url=detail_url or list_page_url,
 			)
 
-			# MTG_DE에서 연도 추출
-			year = extract_year_from_date(parsed.get("MTG_DE"))
+			# 현재 연도 추출
+			year = datetime.now().strftime("%Y")
 
 			# 임시 경로에 다운로드, 원본 파일명 확정
 			save_path, saved_name, file_url = await download_attachment_file(
