@@ -22,7 +22,7 @@ app = FastAPI(title="Enterprise Council Scraper API")
 app.state.stop_scraping = False
 DOWNLOAD_DIR = "download"
 FILE_DOWNLOAD_DIR = "attachment"
-# FILE_DOWNLOAD_DIR = "/clicker-apps/diquest/fileDown/tempDir"
+FIELD_LOGS_DIR = "field_logs"
 
 # 차단할 리소스 타입
 BLOCKED_RESOURCES = {"image", "stylesheet", "media", "font"}
@@ -39,12 +39,19 @@ _P_NUMPR_ONLY    = re.compile(r'제\s*(\d+)\s*대')                        # "�
 _P_SESN_ONLY     = re.compile(r'제\s*(\d+)\s*회')                        # "제266회"
 _P_DIGIT_ONLY    = re.compile(r'^\d+$')                                  # "8", "266"
 _P_SLASH_NUMPR_SESN = re.compile(r'(\d+)\s*대\s*/\s*제\s*(\d+)\s*회')     # "9대 / 제315회 임시회"
-_P_HYPHEN_NUMPR_SESN = re.compile(r'(\d+)\s*대\s*[-–—]\s*(\d+)\s*회')  # "9대-287회"
+_P_HYPHEN_NUMPR_SESN = re.compile(r'(\d+)\s*대\s*[-–—]\s*(\d+)\s*회')   # "9대-287회"
+_P_DAE_HOE = re.compile(r'(\d+)\s*대\s*(\d+)\s*회')                     # "9대 268회"
 # 날짜 형식
 _DATE_PATTERN = re.compile(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})')
 
 # LAST_DATA 비교용 핵심 필드 목록 / 하드코딩없이 우선순위 순으로 시도
 _LAST_DATA_MATCH_KEYS: List[str] = ["URL","BI_SJ","BI_CN","BI_NO",]
+
+# 감사 대상 키 집합 (복합 파서가 분리 생성하는 키 포함)
+_AUDIT_KEYS: frozenset = frozenset(
+    list(FIELD_MAP.values()) +
+    [v for sec in SECTION_FIELD_MAP.values() for v in sec.values()]
+) - {"RASMBLY_NUMPR_SESN"}  # 복합키는 파서가 분리하므로 제외
 
 # ────────────────────────────────────────────────────────────
 # [신규] last_data 모델
@@ -206,6 +213,10 @@ def _parse_numpr_sesn(value: str) -> Dict[str, str]:
     m = _P_HYPHEN_NUMPR_SESN.search(v)
     if m:
         return {"RASMBLY_NUMPR": _to_int_str(m.group(1)),"RASMBLY_SESN":  _to_int_str(m.group(2))}
+    
+    m = _P_DAE_HOE.search(v)
+    if m:
+        return {"RASMBLY_NUMPR": _to_int_str(m.group(1)), "RASMBLY_SESN": _to_int_str(m.group(2))}
 
     m = _P_NUMPR_ONLY.search(v)
     if m:
@@ -349,13 +360,7 @@ def is_last_data_match(item: Dict[str, Any], last_sig: Dict[str, str]) -> bool:
     return False
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# [신규] last_data 리스트 단계 조기 중단 판별
-#
-# 리스트 단계에서 view_id 또는 URL로 먼저 필터링하여
-# 불필요한 상세 페이지 진입을 사전에 차단
-# ────────────────────────────────────────────────────────────────────────────
-
+# last_data 리스트 단계 조기 중단 판별
 def is_list_item_past_last(list_item: Dict[str, Any], last_sig: Dict[str, str]) -> bool:
     """
     리스트 수집 결과의 단일 item 이 last_data 의 기준점 이후 데이터인지 판별.
@@ -385,6 +390,35 @@ def is_list_item_past_last(list_item: Dict[str, Any], last_sig: Dict[str, str]) 
 
     return False
 
+# 컬럼 수집 감사 로그 생성
+def audit_fields(view_id: str, url: str, bi_cn: str, item: dict) -> dict:
+    """
+    수집 결과 item을 FIELD_MAP 전체 기대값과 비교해
+    collected / empty / missing 세 버킷으로 분류한 감사 로그 반환.
+    """
+    collected, empty, missing = [], [], []
+    for key in sorted(_AUDIT_KEYS):
+        if key not in item:              missing.append(key)
+        elif not str(item[key]).strip(): empty.append(key)
+        else:                            collected.append(key)
+
+    # 플랫 반환 — save_field_logs에서 {"field_log": entry}로 래핑
+    return {
+        "view_id":   view_id,
+        "BI_CN":     bi_cn,
+        "URL":       url,
+        "collected": collected,
+        "empty":     empty,
+        "missing":   missing,
+    }
+
+def save_field_logs(field_logs: list, req: "ScrapeRequest") -> None:
+    now  = datetime.now()
+    path = os.path.join(FIELD_LOGS_DIR, req.type, req.crw_id, now.strftime("%Y"), now.strftime("%m"), f"{req.req_id}.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({FIELD_LOGS_DIR: field_logs}, f, ensure_ascii=False, indent=4)
+    print(f"[+] field_logs 저장: {path} ({len(field_logs)}건)", flush=True)
 
 # --- 브라우저 / 페이지네이션 헬퍼 ---
 
@@ -401,7 +435,7 @@ async def _collect_pages(page, list_url, numpr, list_class, vid_param,
     collect_errors = []
     last_data_reached = False  # ← [신규] 중단 플래그
 
-    await page.goto(list_url, wait_until="domcontentloaded", timeout=30000)
+    await page.goto(list_url, wait_until="domcontentloaded", timeout=3000)
     
     if numpr and numpr.strip():
         # 검색 후 list_class가 나타날 때까지 기다리도록 인자 추가
@@ -409,7 +443,7 @@ async def _collect_pages(page, list_url, numpr, list_class, vid_param,
         collect_errors.extend(filter_errors)
     else:
         # 검색 안 할 때도 리스트는 기다려야 함
-        await page.wait_for_selector(normalize_selector(list_class), timeout=10000)
+        await page.wait_for_selector(normalize_selector(list_class), timeout=2000)
 
     total = await UniversalCrawler.get_total_pages(page, end_btn_sel)
     safe_max = int(max_pages.strip()) if max_pages and max_pages.strip().isdigit() else 0
@@ -463,7 +497,7 @@ async def _try_url_fallback(page, next_page):
     new_url = re.sub(PAGE_PARAM_PATTERN, rf'\g<1>={next_page}', url, flags=re.IGNORECASE)
     if new_url != url:
         try:
-            await page.goto(new_url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(new_url, wait_until="domcontentloaded", timeout=3000)
         except Exception as e:
             print(f"[!] URL fallback 실패: {e}", flush=True)
 
@@ -502,7 +536,7 @@ class UniversalCrawler:
             try:
                 print(f"[*] 검색 버튼 대기 및 클릭: {btn_sel}", flush=True)
                 # 버튼이 나타날 때까지 짧게 대기 후 클릭
-                btn = await page.wait_for_selector(btn_sel, timeout=5000, state="visible")
+                btn = await page.wait_for_selector(btn_sel, timeout=3000, state="visible")
                 if btn:
                     # ★ 핵심 수정: navigation 여부를 모름 → 분기 처리
                     onclick_val = await btn.get_attribute("onclick") or ""
@@ -525,11 +559,11 @@ class UniversalCrawler:
                                 const el = document.querySelector('{normalize_selector(list_class)} tbody > tr');
                                 return el !== null;
                             }}""",
-                            timeout=15000
+                            timeout=3000
                         )
                     else:
                         # 일반 페이지 이동 버튼
-                        async with page.expect_navigation(timeout=10000):
+                        async with page.expect_navigation(timeout=3000):
                             await btn.click()
 
                 print("[+] 검색 버튼 클릭 성공", flush=True)
@@ -548,7 +582,7 @@ class UniversalCrawler:
             # 3. 결과 로딩 확인
             if list_class:
                 try:
-                    await page.wait_for_selector(normalize_selector(list_class), timeout=10000)
+                    await page.wait_for_selector(normalize_selector(list_class), timeout=2000)
                     print("[+] 리스트 로드 완료", flush=True)
                 except Exception as e:
                     msg = str(e)
@@ -636,7 +670,7 @@ class UniversalCrawler:
     async def extract_list_page(page: Page, list_class: str, view_id_param: str = "code") -> List[Dict[str, Any]]:
         """경량 목록 추출: ID/링크 중심 (상세 진입용)"""
         selector = normalize_selector(list_class)
-        await page.wait_for_selector(selector, timeout=10000)
+        await page.wait_for_selector(selector, timeout=3000)
 
         items = []
         for row in await page.query_selector_all(f"{selector} tbody > tr, {selector} ul > li, {selector} .list_row"):
@@ -655,7 +689,7 @@ class UniversalCrawler:
     @staticmethod
     async def extract_view_detail(page: Page, view_class: str, base_url: str, req: "ScrapeRequest", bi_cn: str = "") -> Dict[str, Any]:
         selector = normalize_selector(view_class)
-        await page.wait_for_selector(selector, timeout=10000)
+        await page.wait_for_selector(selector, timeout=3000)
 
         result = {}
         section, rs_counter = None, 0
@@ -771,10 +805,14 @@ class UniversalCrawler:
                         continue
 
                     val = clean_text(await td_el.inner_text())
-                    is_file = any(x in label for x in ["첨부", "파일", "원문", "의안명", "원안", "수정안", "심사보고서", "공포문"])
+                    is_file = any(x in label for x in ["첨부", "파일", "원문", "의안명", "원안", "수정안", "심사보고서", "공포문", "의안", "보고서"])
                     is_meeting = "회의록" in label
 
                     if is_file or is_meeting:
+                        # ── 첨부파일 중복 수집 방지 ──────────────────────────
+                        if is_file and result.get("BI_FILE_NM"):
+                            continue
+
                         year = result.get("ITNC_DE", "")[:4] or str(datetime.now().year)
                         attachments = await UniversalCrawler._extract_attachments(
                             td_el, page, base_url, is_file, req=req, bi_cn=bi_cn, year=year
@@ -1118,7 +1156,7 @@ class UniversalCrawler:
             if not title:
                 title = clean_text(await el.inner_text()) or ""
 
-            skip_keywords = ["바로보기", "바로듣기", "미리보기", "뷰어"]
+            skip_keywords = ["바로보기", "바로듣기", "미리보기", "뷰어", "첨부파일명, 미리보기 새창으로 이동"]
             if is_file and (any(k in raw for k in skip_keywords) or any(k in title for k in skip_keywords)):
                 continue
             if not raw:
@@ -1138,7 +1176,7 @@ class UniversalCrawler:
                 try:
                     await el.evaluate("node => { if(node.tagName === 'A') node.removeAttribute('target'); }")
 
-                    async with page.expect_download(timeout=15000) as dl_info:
+                    async with page.expect_download(timeout=10000) as dl_info:
                         await el.click()
 
                     download = await dl_info.value
@@ -1172,7 +1210,7 @@ class UniversalCrawler:
                         url_val = urljoin(base_url, url_val)
                     if page.url != base_url:
                         try:
-                            await page.goto(base_url, wait_until="domcontentloaded", timeout=5000)
+                            await page.goto(base_url, wait_until="domcontentloaded", timeout=3000)
                         except:
                             pass
             else:
@@ -1258,7 +1296,7 @@ class UniversalCrawler:
                 try:
                     await page.wait_for_function(
                         "() => document.querySelectorAll('tbody#searchList tr').length > 0",
-                        timeout=10000
+                        timeout=5000
                     )
                 except:
                     await page.wait_for_timeout(1000)  # fallback
@@ -1285,6 +1323,7 @@ async def execute_view_scraping(req: ScrapeRequest):
     list_data, view_data = [], []
     filepath = None
     error_logs = []
+    field_logs: List[dict] = []
 
     # last_data 가 없으면 None → 기존 전체 수집 동작 그대로 유지
     last_sig: Optional[Dict[str, str]] = (
@@ -1340,7 +1379,7 @@ async def execute_view_scraping(req: ScrapeRequest):
                 target_url = urljoin(p.list_url, href) if is_real else f"{p.view_url}{'&' if '?' in p.view_url else '?'}{p.view_id_param}={vid}"
 
                 try:
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=5000)
                     
                     parsed = urlparse(target_url)
                     base = f"{parsed.scheme}://{parsed.netloc}"
@@ -1348,6 +1387,9 @@ async def execute_view_scraping(req: ScrapeRequest):
                     bi_cn  = str(str(time.time_ns())[:16])
                     detail = await UniversalCrawler.extract_view_detail(page, p.view_class, base, req=req, bi_cn=bi_cn)
                     collected_item = {"view_id": vid, "URL": target_url, "BI_CN": f"CLIKC{bi_cn}", **detail}
+
+                    # ── 필드 감사 로그 ──────────────────────────────────────────
+                    field_logs.append(audit_fields(vid, target_url, f"CLIKC{bi_cn}", collected_item))
 
                     # ── [신규] 상세 데이터 기준 last_data 비교 ────────────────
                     # 리스트 단계에서 걸러지지 않은 경우의 보조 안전망
@@ -1382,7 +1424,10 @@ async def execute_view_scraping(req: ScrapeRequest):
             # ── [신규] last_data 모드일 때 result message 보완 ───────────────
             if (last_data_reached or detail_last_data_reached) and result_block["status"] in ("SUCCESS", "PARTIAL"):
                 result_block["message"] = "추가수집 완료 (last_data 기준점 도달)"
-            # ────────────────────────────────────────────────────────────────
+
+            # ── field_logs 저장 (insert_api 전송 제외) ─────────────────────
+            if field_logs:
+                save_field_logs(field_logs, req)
 
             full_payload = {
                     "reqId":   req.req_id,
@@ -1497,7 +1542,7 @@ async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
         try:
             # 1단계: 리스트 1페이지만 수집
             print(f"[TEST] 리스트 수집: {p.list_url}", flush=True)
-            await page.goto(p.list_url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(p.list_url, wait_until="domcontentloaded", timeout=3000)
 
             if p.rasmbly_numpr and p.rasmbly_numpr.strip():
                 await UniversalCrawler.apply_filter_and_search(
@@ -1505,7 +1550,7 @@ async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
                     p.search_form_selector, p.numpr_select_selector, p.search_btn_selector,
                 )
             else:
-                await page.wait_for_selector(normalize_selector(p.list_class), timeout=10000)
+                await page.wait_for_selector(normalize_selector(p.list_class), timeout=3000)
 
             list_data = await UniversalCrawler.extract_list_page(page, p.list_class, p.view_id_param)
 
@@ -1530,7 +1575,7 @@ async def execute_view_scraping_test(req: ScrapeRequest) -> dict:
                 print(f"[TEST] 상세 수집: {vid}", flush=True)
 
                 try:
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=3000)
                     parsed_url = urlparse(target_url)
                     base = f"{parsed_url.scheme}://{parsed_url.netloc}"
                     bi_cn  = str(str(time.time_ns())[:16])
