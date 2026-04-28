@@ -189,22 +189,6 @@ def safe_select(element, selector: str):
 		return []
 
 
-def unique_keep_order(values: list[str]) -> list[str]:
-	seen = set()
-	result: list[str] = []
-
-	for value in values:
-		normalized = normalize_text(value)
-		if not normalized:
-			continue
-		if normalized in seen:
-			continue
-		seen.add(normalized)
-		result.append(normalized)
-
-	return result
-
-
 def get_verify_options(ssl_mode: str):
 	if ssl_mode == "Y":
 		return certifi.where()
@@ -291,34 +275,6 @@ def is_meaningful_detail_url(detail_url: Optional[str], list_url: str) -> bool:
 		return False
 
 	return True
-
-
-def extract_filename_from_url(url: str) -> Optional[str]:
-	try:
-		path = urlparse(url).path
-		if not path:
-			return None
-		name = path.split("/")[-1]
-		return normalize_text(name) or None
-	except Exception:
-		return None
-
-
-def clean_title_candidate(text: str) -> str:
-	value = normalize_text(text)
-	value = re.sub(r"\b(회의록|회\s*의\s*록|회의록보기|원문보기)\b", "", value)
-	value = normalize_text(value)
-	return value
-
-
-def find_first_regex(text: str, patterns: list[str]) -> Optional[str]:
-	for pattern in patterns:
-		match = re.search(pattern, text, re.IGNORECASE)
-		if match:
-			if match.groups():
-				return normalize_text(match.group(1))
-			return normalize_text(match.group(0))
-	return None
 
 
 def apply_regex_raw(source: str, pattern: Optional[str]) -> Optional[str]:
@@ -440,10 +396,6 @@ def to_model_dict(model) -> dict:
 	return model.dict()
 
 
-def generate_crw_id() -> str:
-	return f"CRW_{uuid4().hex}"
-
-
 def build_file_save_path(
 	file_dir: str,
 	crawl_type: str,
@@ -537,6 +489,7 @@ def parse_crawl_request(raw: CrawlRequest):
 	#     return BillCrawlRequest(...)
 
 	raise HTTPException(status_code=400, detail=f"지원하지 않는 type입니다: {raw.type}")
+
 
 def matches_last_data(
 	item_fields: dict[str, Optional[str]],
@@ -1641,7 +1594,7 @@ async def crawl_all_api(
 ):
 	request = parse_crawl_request(raw)
 
-	crw_id = request.crw_id or generate_crw_id()
+	crw_id = request.crw_id
 	request_dict = to_model_dict(request)
 	request_dict["crw_id"] = crw_id
 	request_copy = type(request)(**request_dict)
