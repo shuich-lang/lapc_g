@@ -56,6 +56,8 @@ class SpchParam(BaseModel):
 	ssl_mode: str = Field("Y")
 	max_pages: int = Field(500)
 	skip_top_count: int = Field(0)
+	is_multi_spch: str = Field("N")
+
 
 
 class RegexItem(BaseModel):
@@ -221,6 +223,23 @@ def apply_regex_raw(source: str, pattern: Optional[str]) -> Optional[str]:
 	return match.group(0)
 
 
+def apply_regex_all(source: str, pattern: Optional[str]) -> list[str]:
+	"""정규식 전체 매치(findall). 캡처그룹이 있으면 group(1)만 반환."""
+	if not pattern:
+		return []
+	try:
+		matches = re.finditer(pattern, source, re.IGNORECASE | re.DOTALL)
+	except re.error as exc:
+		raise ValueError(f"잘못된 정규식입니다: {pattern} / {str(exc)}") from exc
+	results = []
+	for m in matches:
+		if m.groups():
+			results.append(m.group(1))
+		else:
+			results.append(m.group(0))
+	return results
+
+
 def strip_html_tags(value: Optional[str]) -> Optional[str]:
 	if not value:
 		return None
@@ -382,6 +401,52 @@ def parse_spch_detail_by_dynamic_regex(
 			result[key] = normalize_text(raw_value)
 
 	return result
+
+
+def parse_spch_detail_multi(
+	detail_html: str,
+	request: SpchCrawlRequest,
+	list_title: Optional[str] = None,
+) -> list[dict[str, Optional[str]]]:
+	"""multi_speech 모드: 각 RegexItem을 findall → 인덱스 매칭으로 N건 생성."""
+	columns: dict[str, Optional[list[Optional[str]]]] = {}
+	max_count = 0
+
+	for item in request.item:
+		key = normalize_text(item.col)
+		if not key:
+			continue
+
+		if len(item.regex) == 1 and normalize_text(item.regex[0]).lower() == "list_title":
+			columns[key] = None
+			continue
+
+		raw_values: list[str] = []
+		for pattern in item.regex:
+			raw_values = apply_regex_all(detail_html, pattern)
+			if raw_values:
+				break
+
+		if item.removeTags == "Y":
+			columns[key] = [strip_html_tags(v) for v in raw_values]
+		else:
+			columns[key] = [normalize_text(v) for v in raw_values]
+
+		max_count = max(max_count, len(columns[key]))
+
+	if max_count == 0:
+		return []
+
+	for key, values in columns.items():
+		if values is None:
+			columns[key] = [normalize_text(list_title)] * max_count
+		elif len(values) < max_count:
+			columns[key] = values + [None] * (max_count - len(values))
+
+	return [
+		{key: vals[i] for key, vals in columns.items()}
+		for i in range(max_count)
+	]
 
 
 # =========================
@@ -843,8 +908,10 @@ async def crawl_spch_regex_check(
 			detail=f"목록 페이지 요청 실패: {type(exc).__name__} / {str(exc)}",
 		) from exc
 
+	is_multi = request.param.is_multi_spch == "Y"
 	all_items: list[SpchItem] = []
 	seen_keys: set[str] = set()
+	visited_urls: set[str] = set()
 
 	for page_idx, (page_url, page_html) in enumerate(list_pages, start=1):
 		print(f"[SPCH] ===== {page_idx} 페이지 처리 중 ===== URL: {page_url}")
@@ -871,17 +938,106 @@ async def crawl_spch_regex_check(
 				current_rank = len(all_items) + 1
 				print(f"[SPCH] 현재 문서 색인 중: {current_rank}번째 | 제목: {candidate.get('title')}")
 
-				item = await build_spch_item_by_dynamic_regex(
-					request=request,
-					list_page_url=page_url,
-					candidate=candidate,
-					rank_index_in_page=idx - 1,
-					final_rank=current_rank,
+				# --- 상세 페이지 접근 ---
+				title = candidate["title"]
+				href = candidate["href"]
+				onclick = candidate["onclick"]
+
+				detail_url, access_method, open_type, detail_html, note = await open_detail_page(
+					list_url=page_url,
+					list_root_selector=request.param.list_root_selector,
+					item_selector=request.param.item_selector,
+					target_selector=request.param.target_selector,
+					rank_index=idx - 1,
+					href=href,
+					onclick=onclick,
+					ssl_mode=request.param.ssl_mode,
 				)
+
+				# -- 다건 item: 이미 방문한 url은 skip
+				if is_multi and detail_url and detail_url in visited_urls:
+					print(f"[SPCH] multi 모드 - 이미 방문한 URL skip: {detail_url}")
+					continue
+				if is_multi and detail_url:
+					visited_urls.add(detail_url)
+
+				uid = extract_uid(detail_url)
+
+				if not detail_html:
+					items = [SpchItem(
+						rank=current_rank,
+						list_title=title,
+						detail_url=detail_url,
+						access_method=access_method,
+						open_type=open_type,
+						detail_access_success=False,
+						fields={},
+						uid=uid,
+						raw_href=href,
+						raw_onclick=onclick,
+						note=note or "상세 view 접근 실패",
+					)]
+				elif is_multi:
+					parsed_list = parse_spch_detail_multi(
+						detail_html=detail_html,
+						request=request,
+						list_title=title,
+					)
+					if not parsed_list:
+						items = [SpchItem(
+							rank=current_rank,
+							list_title=title,
+							detail_url=detail_url,
+							access_method=access_method,
+							open_type=open_type,
+							detail_access_success=True,
+							fields={},
+							uid=uid,
+							raw_href=href,
+							raw_onclick=onclick,
+							note=(note or "") + " | multi 모드이나 매치 결과 없음",
+						)]
+					else:
+						items = [
+							SpchItem(
+								rank=current_rank + i,
+								list_title=title,
+								detail_url=detail_url,
+								access_method=access_method,
+								open_type=open_type,
+								detail_access_success=True,
+								fields=parsed,
+								uid=uid,
+								raw_href=href,
+								raw_onclick=onclick,
+								note=note,
+							)
+							for i, parsed in enumerate(parsed_list)
+						]
+				else:
+					parsed = parse_spch_detail_by_dynamic_regex(
+						detail_html=detail_html,
+						request=request,
+						list_title=title,
+					)
+					items = [SpchItem(
+						rank=current_rank,
+						list_title=title,
+						detail_url=detail_url,
+						access_method=access_method,
+						open_type=open_type,
+						detail_access_success=True,
+						fields=parsed,
+						uid=uid,
+						raw_href=href,
+						raw_onclick=onclick,
+						note=note,
+					)]
+
 			except ValueError as exc:
 				raise HTTPException(status_code=400, detail=str(exc)) from exc
 			except Exception as exc:
-				item = SpchItem(
+				items = SpchItem(
 					rank=len(all_items) + 1,
 					list_title=candidate["title"],
 					detail_url=None,
@@ -895,13 +1051,13 @@ async def crawl_spch_regex_check(
 					note=f"상세 처리 실패: {type(exc).__name__}",
 				)
 
-			dedupe_key = item.uid or item.detail_url or f"{item.list_title}|{item.raw_href}|{item.raw_onclick}"
-			if crawl_all and dedupe_key in seen_keys:
-				continue
-
-			seen_keys.add(dedupe_key)
-			item.rank = len(all_items) + 1
-			all_items.append(item)
+			for item in items:
+				dedupe_key = item.uid or item.detail_url or f"{item.list_title}|{item.raw_href}|{item.raw_onclick}"
+				if crawl_all and dedupe_key in seen_keys:
+					continue
+				seen_keys.add(dedupe_key)
+				item.rank = len(all_items) + 1
+				all_items.append(item)
 
 	if not all_items:
 		raise HTTPException(
