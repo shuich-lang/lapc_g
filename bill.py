@@ -435,7 +435,7 @@ async def _collect_pages(page, list_url, numpr, list_class, vid_param,
     collect_errors = []
     last_data_reached = False  # ← [신규] 중단 플래그
 
-    await page.goto(list_url, wait_until="domcontentloaded", timeout=5000)
+    await page.goto(list_url, wait_until="domcontentloaded", timeout=10000)
     
     if numpr and numpr.strip():
         # 검색 후 list_class가 나타날 때까지 기다리도록 인자 추가
@@ -1156,16 +1156,26 @@ class UniversalCrawler:
             if not title:
                 title = clean_text(await el.inner_text()) or ""
 
-            skip_keywords = ["바로보기", "바로듣기", "미리보기", "뷰어", "첨부파일명, 미리보기 새창으로 이동", "바로보기"]
-            if is_file and (any(k in raw for k in skip_keywords) or any(k in title for k in skip_keywords)):
-                continue
-            if not raw:
-                continue
-
             href = await el.get_attribute("href") or ""
             onclick = await el.get_attribute("onclick") or ""
             is_js = href.startswith(("javascript", "#")) or (onclick and not href)
             url_val = onclick if is_js else (href or onclick)
+            el_class = await el.get_attribute("class") or ""
+
+            # ── 뷰어/미리보기 차단 ──────────────────────────────────
+            skip_keywords  = ["바로보기", "바로듣기", "미리보기", "뷰어", "첨부파일명, 미리보기 새창으로 이동"]
+            viewer_onclick = ["previewAjax", "preListen", "preview", "viewer"]
+            viewer_href    = ["synap", "htmlViewer"]
+            viewer_class   = ["abtn_preview", "preview"]
+
+            if is_file and (
+                any(k in raw      for k in skip_keywords)  or
+                any(k in title    for k in skip_keywords)  or
+                any(k in onclick  for k in viewer_onclick) or
+                any(k in href     for k in viewer_href)    or
+                any(k in el_class for k in viewer_class)
+            ):
+                continue
 
             original_name = raw  # ★ 원본명 미리 보관
             save_name = raw
@@ -1379,7 +1389,7 @@ async def execute_view_scraping(req: ScrapeRequest):
                 target_url = urljoin(p.list_url, href) if is_real else f"{p.view_url}{'&' if '?' in p.view_url else '?'}{p.view_id_param}={vid}"
 
                 try:
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=5000)
+                    await page.goto(target_url, wait_until="domcontentloaded", timeout=10000)
                     
                     parsed = urlparse(target_url)
                     base = f"{parsed.scheme}://{parsed.netloc}"
