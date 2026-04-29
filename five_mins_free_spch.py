@@ -39,14 +39,15 @@ USER_AGENT = (
 )
 
 # CALLBACK_INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"		# 실제 CMS 서버 (도커 외부에서 접근용)
-# CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
+CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
 # CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
 # CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
-CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"			# 운영 cms
+# CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"			# 운영 cms
 
 # =========================
 # Request / Response Model
 # =========================
+
 
 class SpchParam(BaseModel):
 	list_url: HttpUrl = Field(...)
@@ -55,9 +56,8 @@ class SpchParam(BaseModel):
 	target_selector: str = Field(...)
 	ssl_mode: str = Field("Y")
 	max_pages: int = Field(500)
-	skip_top_count: int = Field(0)
-	is_multi_spch: str = Field("N")
-
+	skip_top_count: int = Field(0, description="상단 게시물 패스 수 (고정 공지글 방어용)")
+	is_multi_spch: str = Field("N", description="한 목록 당다건 추출이면 Y, 단건 추출이면 N")
 
 
 class RegexItem(BaseModel):
@@ -100,7 +100,7 @@ class SpchCrawlResponse(BaseModel):
 
 
 # =========================
-# Utility (minutes.py와 동일)
+# Utility
 # =========================
 
 def normalize_text(text: Optional[str]) -> str:
@@ -209,35 +209,48 @@ def is_meaningful_detail_url(detail_url: Optional[str], list_url: str) -> bool:
 	return True
 
 
-def apply_regex_raw(source: str, pattern: Optional[str]) -> Optional[str]:
-	if not pattern:
+def apply_regex_raw(source: str, patterns: list[str]) -> Optional[str]:
+	"""정규식 체이닝: 배열의 각 패턴을 순차 적용. 이전 결과 안에서 다음 패턴 매치."""
+	if not patterns:
 		return None
-	try:
-		match = re.search(pattern, source, re.IGNORECASE | re.DOTALL)
-	except re.error as exc:
-		raise ValueError(f"잘못된 정규식입니다: {pattern} / {str(exc)}") from exc
-	if not match:
-		return None
-	if match.groups():
-		return match.group(1)
-	return match.group(0)
+	current = source
+	for pattern in patterns:
+		if not pattern or current is None:
+			return None
+		try:
+			match = re.search(pattern, current, re.IGNORECASE | re.DOTALL)
+		except re.error as exc:
+			raise ValueError(f"잘못된 정규식입니다: {pattern} / {str(exc)}") from exc
+		if not match:
+			return None
+		current = match.group(1) if match.groups() else match.group(0)
+	return current
 
 
-def apply_regex_all(source: str, pattern: Optional[str]) -> list[str]:
-	"""정규식 전체 매치(findall). 캡처그룹이 있으면 group(1)만 반환."""
-	if not pattern:
+def apply_regex_all(source: str, patterns: list[str]) -> list[str]:
+	"""정규식 체이닝(multi): 마지막 패턴 전까지는 search로 구간 축소, 마지막은 findall."""
+	if not patterns:
 		return []
-	try:
-		matches = re.finditer(pattern, source, re.IGNORECASE | re.DOTALL)
-	except re.error as exc:
-		raise ValueError(f"잘못된 정규식입니다: {pattern} / {str(exc)}") from exc
-	results = []
-	for m in matches:
-		if m.groups():
-			results.append(m.group(1))
-		else:
-			results.append(m.group(0))
-	return results
+	current = source
+	for i, pattern in enumerate(patterns):
+		if not pattern or current is None:
+			return []
+		is_last = (i == len(patterns) - 1)
+		try:
+			if is_last:
+				matches = re.finditer(pattern, current, re.IGNORECASE | re.DOTALL)
+				results = []
+				for m in matches:
+					results.append(m.group(1) if m.groups() else m.group(0))
+				return results
+			else:
+				match = re.search(pattern, current, re.IGNORECASE | re.DOTALL)
+				if not match:
+					continue
+				current = match.group(1) if match.groups() else match.group(0)
+		except re.error as exc:
+			raise ValueError(f"잘못된 정규식입니다: {pattern} / {str(exc)}") from exc
+	return []
 
 
 def strip_html_tags(value: Optional[str]) -> Optional[str]:
@@ -302,16 +315,6 @@ def replace_query_param(url: str, param_name: str, param_value: str) -> str:
 		parsed.scheme, parsed.netloc, parsed.path,
 		parsed.params, new_query, parsed.fragment,
 	))
-
-
-def to_model_dict(model) -> dict:
-	if hasattr(model, "model_dump"):
-		return model.model_dump()
-	return model.dict()
-
-
-def generate_crw_id() -> str:
-	return f"CRW_{uuid4().hex}"
 
 
 # =========================
@@ -389,11 +392,7 @@ def parse_spch_detail_by_dynamic_regex(
 			result[key] = value or None
 			continue
 
-		raw_value = None
-		for pattern in item.regex:
-			raw_value = apply_regex_raw(detail_html, pattern)
-			if raw_value is not None:
-				break
+		raw_value = apply_regex_raw(detail_html, item.regex)
 
 		if item.removeTags == "Y":
 			result[key] = strip_html_tags(raw_value)
@@ -421,11 +420,7 @@ def parse_spch_detail_multi(
 			columns[key] = None
 			continue
 
-		raw_values: list[str] = []
-		for pattern in item.regex:
-			raw_values = apply_regex_all(detail_html, pattern)
-			if raw_values:
-				break
+		raw_values = apply_regex_all(detail_html, item.regex)
 
 		if item.removeTags == "Y":
 			columns[key] = [strip_html_tags(v) for v in raw_values]
@@ -440,6 +435,8 @@ def parse_spch_detail_multi(
 	for key, values in columns.items():
 		if values is None:
 			columns[key] = [normalize_text(list_title)] * max_count
+		elif len(values) == 1 and max_count > 1:
+			columns[key] = values * max_count
 		elif len(values) < max_count:
 			columns[key] = values + [None] * (max_count - len(values))
 
@@ -935,7 +932,7 @@ async def crawl_spch_regex_check(
 
 		for idx, candidate in enumerate(candidates, start=1):
 			try:
-				current_rank = len(all_items) + 1
+				current_rank = idx
 				print(f"[SPCH] 현재 문서 색인 중: {current_rank}번째 | 제목: {candidate.get('title')}")
 
 				# --- 상세 페이지 접근 ---
@@ -984,6 +981,7 @@ async def crawl_spch_regex_check(
 						list_title=title,
 					)
 					if not parsed_list:
+						print(f"[SPCH] 문서 {idx}번째 | multi 모드이나 매치 결과 없음")
 						items = [SpchItem(
 							rank=current_rank,
 							list_title=title,
@@ -998,6 +996,10 @@ async def crawl_spch_regex_check(
 							note=(note or "") + " | multi 모드이나 매치 결과 없음",
 						)]
 					else:
+						for speech_idx, parsed in enumerate(parsed_list, start=1):
+							speaker_name = parsed.get("SPCH_MEN") or "의원명 없음"
+							print(f"[SPCH] 문서 {idx}번째 | 발언 {speech_idx} 수집 성공 ({speaker_name} 의원)")
+
 						items = [
 							SpchItem(
 								rank=current_rank + i,
@@ -1052,7 +1054,12 @@ async def crawl_spch_regex_check(
 				)
 
 			for item in items:
-				dedupe_key = item.uid or item.detail_url or f"{item.list_title}|{item.raw_href}|{item.raw_onclick}"
+				if is_multi:
+					# multi: 같은 URL이라도 발언 내용이 다르면 별개 건
+					field_sig = "|".join(str(v) for v in item.fields.values() if v)
+					dedupe_key = f"{item.detail_url}|{field_sig}"
+				else:
+					dedupe_key = item.uid or item.detail_url or f"{item.list_title}|{item.raw_href}|{item.raw_onclick}"
 				if crawl_all and dedupe_key in seen_keys:
 					continue
 				seen_keys.add(dedupe_key)
