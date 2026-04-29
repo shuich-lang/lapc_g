@@ -872,16 +872,33 @@ async def build_spch_item_by_dynamic_regex(
 # Callback
 # =========================
 
+def make_row_dedupe_key(row: dict) -> str:
+	title = normalize_text(row.get("SPCH_TITLE"))
+	date = normalize_text(row.get("SPCH_DATE"))
+	men = normalize_text(row.get("SPCH_MEN"))
+	content_head = normalize_text(row.get("SPCH_CONTENT"))[:50]
+
+	return f"{title}|{date}|{men}|{content_head}"
+
+
 def build_spch_callback_payload(
 	request: SpchCrawlRequest,
 	crawl_response: SpchCrawlResponse,
 ) -> dict:
 	data = []
+	seen_row_keys = set()
 	
 	for item in crawl_response.items:
 		if item.fields:
 			row = dict(item.fields)
 			row["url"] = item.detail_url
+
+			dedupe_key = make_row_dedupe_key(row)
+			if dedupe_key in seen_row_keys:
+				print(f"[SPCH] 중복 발견 skip - dedupe_key: {dedupe_key}")
+				continue
+
+			seen_row_keys.add(dedupe_key)
 			data.append(row)
 
 	return {
