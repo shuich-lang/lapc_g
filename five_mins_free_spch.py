@@ -446,6 +446,33 @@ def parse_spch_detail_multi(
 	]
 
 
+# 제목 + 날짜 + 이름 동일할 경우 spch_content 병합 (시간 초과로 마이크 꺼짐 방어용)
+def merge_spch_rows(
+	rows: list[dict[str, Optional[str]]],
+	key_cols: tuple[str, ...] = ("SPCH_MEN", "SPCH_TITLE", "SPCH_DATE"),
+	merge_col: str = "SPCH_CONTENT",
+) -> list[dict[str, Optional[str]]]:
+	"""동일 의원+제목+날짜인 행을 합쳐서 SPCH_CONTENT를 이어붙인다."""
+	if not rows:
+		return rows
+	merged: list[dict[str, Optional[str]]] = []
+	for row in rows:
+		key = tuple(row.get(c) for c in key_cols)
+		found = None
+		for prev in merged:
+			prev_key = tuple(prev.get(c) for c in key_cols)
+			if prev_key == key:
+				found = prev
+				break
+		if found is not None:
+			prev_content = found.get(merge_col) or ""
+			cur_content = row.get(merge_col) or ""
+			found[merge_col] = prev_content + cur_content
+		else:
+			merged.append(dict(row))
+	return merged
+
+
 # =========================
 # Paging auto-detection
 # =========================
@@ -980,6 +1007,7 @@ async def crawl_spch_regex_check(
 						request=request,
 						list_title=title,
 					)
+					parsed_list = merge_spch_rows(parsed_list)
 					if not parsed_list:
 						print(f"[SPCH] 문서 {idx}번째 | multi 모드이나 매치 결과 없음")
 						items = [SpchItem(
