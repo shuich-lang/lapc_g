@@ -661,26 +661,50 @@ def parse_minutes_detail_by_dynamic_regex(
 # Paging auto-detection
 # =========================
 
+def is_paging_area(tag) -> bool:
+    parent = tag
+    while parent:
+        classes = parent.get("class", [])
+        class_text = " ".join(classes) if isinstance(classes, list) else str(classes)
+        tag_id = parent.get("id", "")
+        marker = f"{class_text} {tag_id}"
+
+        if re.search(r"page|paging|pager|pagination|navi", marker, re.I):
+            return True
+
+        parent = parent.parent
+
+    return False
+
+
 def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], list[int]]:
 	soup = BeautifulSoup(html, "lxml")
 	page_numbers = {1}
-
 	candidate_param_names = ["page", "pageNo", "pageNum", "pageIndex", "currentPage"]
 	param_counter: dict[str, int] = {}
 
 	for a in soup.find_all("a"):
 		href = normalize_text(a.get("href"))
-		if not href or href.lower().startswith("javascript:"):
+		text = normalize_text(a.get_text(" ", strip=True))
+		
+		if not href:
 			continue
 
-		absolute_url = urljoin(list_url, href)
-		parsed = urlparse(absolute_url)
-		query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-
-		for key, value in query_pairs:
-			if key in candidate_param_names and value.isdigit():
-				page_numbers.add(int(value))
-				param_counter[key] = param_counter.get(key, 0) + 1
+		# href 쿼리스트링 기반 페이징 처리
+		if not href.lower().startswith("javascript:"):
+			absolute_url = urljoin(list_url, href)
+			parsed = urlparse(absolute_url)
+			query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+			for key, value in query_pairs:
+				if key in candidate_param_names and value.isdigit():
+					page_numbers.add(int(value))
+					param_counter[key] = param_counter.get(key, 0) + 1
+		
+		# javascript 기반 페이징 처리
+		# - 부모 영역이 page/paging/pagination/navi 계열이어야 함
+		# - a 태그 내의 텍스트가 숫자여야 함
+		if is_paging_area(a) and text.isdigit():
+			page_numbers.add(int(text))
 
 	if len(page_numbers) <= 1:
 		return None, [1]
@@ -691,8 +715,71 @@ def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], l
 		if count > best_count:
 			best_param_name = key
 			best_count = count
-
 	return best_param_name, sorted(page_numbers)
+
+
+async def fetch_pages_by_playwright_click(
+    url: str,
+    request: RegexCrawlRequest,
+) -> list[tuple[str, str]]:
+    pages = []
+    seen_signatures = set()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=USER_AGENT,
+            ignore_https_errors=(request.param.ssl_mode == "N"),
+        )
+        page = await context.new_page()
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        await page.wait_for_timeout(1000)
+
+        for page_no in range(1, request.param.max_pages + 1):
+            html = await page.content()
+
+            candidates = extract_list_candidates(
+                html=html,
+                list_root_selector=request.param.list_root_selector,
+                item_selector=request.param.item_selector,
+                target_selector=request.param.target_selector,
+                limit=None,
+            )
+
+            if not candidates:
+                break
+
+            signature = "||".join(
+                f"{c.get('title', '')}|{c.get('href', '')}|{c.get('onclick', '')}"
+                for c in candidates[:10]
+            )
+
+            if signature in seen_signatures:
+                break
+
+            seen_signatures.add(signature)
+            pages.append((page.url, html))
+
+            next_page_no = page_no + 1
+            if next_page_no > request.param.max_pages:
+                break
+
+            next_link = page.locator(
+                f"a.num:text-is('{next_page_no}'), "
+                f".pageForm a:text-is('{next_page_no}'), "
+                f".pageNavi a:text-is('{next_page_no}'), "
+                f"[class*='page'] a:text-is('{next_page_no}')"
+            ).first
+
+            if await next_link.count() == 0:
+                break
+
+            await next_link.click()
+            await page.wait_for_timeout(1000)
+
+        await browser.close()
+
+    return pages
 
 
 def extract_form_request_info(html: str, list_url: str) -> tuple[Optional[str], dict[str, str], Optional[str], list[int]]:
@@ -735,6 +822,24 @@ def extract_form_request_info(html: str, list_url: str) -> tuple[Optional[str], 
 				break
 
 	return action_url, form_data, page_field_name, sorted(page_numbers)
+
+
+async def fetch_list_html_by_playwright(url: str, ssl_mode: str) -> str:
+	"""목록 페이지를 Playwright로 렌더링하여 HTML 반환."""
+	async with async_playwright() as p:
+		browser = await p.chromium.launch(headless=True)
+		context = await browser.new_context(
+			user_agent=USER_AGENT,
+			ignore_https_errors=(ssl_mode == "N")
+		)
+		page = await context.new_page()
+		try:
+			await page.goto(url, wait_until="networkidle", timeout=30000)
+			await page.wait_for_timeout(3000)
+			html = await page.content()
+		finally:
+			await browser.close()
+		return html
 
 
 def extract_file_info_from_reserved_value(
@@ -796,6 +901,20 @@ async def build_list_pages(
 		)
 		return len(candidates) > 0
 
+	use_playwright = False
+	if not has_list_items(first_html):
+		print(f"[MINUTES] httpx 목록 조회 결과 항목 없음 → Playwright 폴백 시도")
+		try:
+			first_html = await fetch_list_html_by_playwright(
+				list_url, 
+				ssl_mode=request.param.ssl_mode
+			)
+			use_playwright = True
+			if not has_list_items(first_html):
+				print(f"[MINUTES] Playwright 목록 조회에서도 항목 없음")
+		except Exception as e:
+			print(f"[MINUTES] Playwright 목록 조회 실패: {e}")
+
 	def make_page_signature(html: str) -> str:
 		candidates = extract_list_candidates(
 			html=html,
@@ -813,6 +932,14 @@ async def build_list_pages(
 
 		return "||".join(signature_parts)
 
+	async def fetch_next_page(url: str) -> str:
+		if use_playwright:
+			return await fetch_list_html_by_playwright(
+				list_url, 
+				ssl_mode=request.param.ssl_mode
+			)
+		return await fetch_html(url, request.param.ssl_mode)
+
 	current_page_no = 1
 	current_url = list_url
 	current_html = first_html
@@ -825,7 +952,6 @@ async def build_list_pages(
 		if signature in seen_page_signatures:
 			break
 		seen_page_signatures.add(signature)
-
 		pages.append((current_url, current_html))
 
 		next_page_no = current_page_no + 1
@@ -834,7 +960,7 @@ async def build_list_pages(
 			next_url = replace_query_param(list_url, link_param_name, str(next_page_no))
 
 			try:
-				next_html = await fetch_html(next_url, request.param.ssl_mode)
+				next_html = await fetch_next_page(next_url)
 			except Exception:
 				break
 
@@ -861,6 +987,16 @@ async def build_list_pages(
 			current_url = action_url
 			current_html = next_html
 			continue
+			
+		print("[MINUTES] 일반 페이징 실패 → Playwright fallback")
+
+		pw_pages = await fetch_pages_by_playwright_click(
+			list_url,
+			request,
+		)
+
+		if len(pw_pages) > 1:
+			return pw_pages
 
 		break
 
