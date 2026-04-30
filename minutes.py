@@ -935,7 +935,7 @@ async def build_list_pages(
 	async def fetch_next_page(url: str) -> str:
 		if use_playwright:
 			return await fetch_list_html_by_playwright(
-				list_url, 
+				url, 
 				ssl_mode=request.param.ssl_mode
 			)
 		return await fetch_html(url, request.param.ssl_mode)
