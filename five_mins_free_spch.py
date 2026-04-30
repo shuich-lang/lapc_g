@@ -645,11 +645,14 @@ def extract_form_request_info(html: str, list_url: str) -> tuple[Optional[str], 
 	return action_url, form_data, page_field_name, sorted(page_numbers)
 
 
-async def fetch_list_html_by_playwright(url: str) -> str:
+async def fetch_list_html_by_playwright(url: str, ssl_mode: str) -> str:
 	"""목록 페이지를 Playwright로 렌더링하여 HTML 반환."""
 	async with async_playwright() as p:
 		browser = await p.chromium.launch(headless=True)
-		context = await browser.new_context(user_agent=USER_AGENT)
+		context = await browser.new_context(
+			user_agent=USER_AGENT,
+			ignore_https_errors=(ssl_mode == "N")
+		)
 		page = await context.new_page()
 		try:
 			await page.goto(url, wait_until="networkidle", timeout=30000)
@@ -689,7 +692,10 @@ async def build_list_pages(
 	if not has_list_items(first_html):
 		print(f"[SPCH] httpx 목록 조회 결과 항목 없음 → Playwright 폴백 시도")
 		try:
-			first_html = await fetch_list_html_by_playwright(list_url)
+			first_html = await fetch_list_html_by_playwright(
+				list_url, 
+				ssl_mode=request.param.ssl_mode
+			)
 			use_playwright = True
 			if not has_list_items(first_html):
 				print(f"[SPCH] Playwright 목록 조회에서도 항목 없음")
@@ -711,7 +717,10 @@ async def build_list_pages(
 
 	async def fetch_next_page(url: str) -> str:
 		if use_playwright:
-			return await fetch_list_html_by_playwright(url)
+			return await fetch_list_html_by_playwright(
+				list_url, 
+				ssl_mode=request.param.ssl_mode
+			)
 		return await fetch_html(url, request.param.ssl_mode)
 
 	current_page_no = 1
@@ -731,10 +740,12 @@ async def build_list_pages(
 
 		if link_param_name:
 			next_url = replace_query_param(list_url, link_param_name, str(next_page_no))
+
 			try:
 				next_html = await fetch_next_page(next_url)
 			except Exception:
 				break
+
 			current_page_no = next_page_no
 			current_url = next_url
 			current_html = next_html
@@ -743,6 +754,7 @@ async def build_list_pages(
 		if action_url and page_field_name:
 			next_form_data = dict(form_data)
 			next_form_data[page_field_name] = str(next_page_no)
+
 			try:
 				next_html = await fetch_html_by_method(
 					url=action_url,
@@ -752,6 +764,7 @@ async def build_list_pages(
 				)
 			except Exception:
 				break
+
 			current_page_no = next_page_no
 			current_url = action_url
 			current_html = next_html
