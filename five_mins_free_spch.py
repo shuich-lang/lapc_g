@@ -64,7 +64,7 @@ class RegexItem(BaseModel):
 	col: str = Field(..., description="응답 key 이름")
 	regex: list[str] = Field(..., description="상세 HTML에서 추출할 정규식")
 	xpath: list[str] = Field(None, description="(미구현) XPath 추출용 필드")
-	removeTags: str = Field(..., description="HTML 태그 제거 여부: Y | N")
+	removeTags: str = Field("Y", description="HTML 태그 제거 여부: Y | N")
 
 
 class SpchCrawlRequest(BaseModel):
@@ -549,6 +549,21 @@ def extract_form_request_info(html: str, list_url: str) -> tuple[Optional[str], 
 	return action_url, form_data, page_field_name, sorted(page_numbers)
 
 
+async def fetch_list_html_by_playwright(url: str) -> str:
+	"""목록 페이지를 Playwright로 렌더링하여 HTML 반환."""
+	async with async_playwright() as p:
+		browser = await p.chromium.launch(headless=True)
+		context = await browser.new_context(user_agent=USER_AGENT)
+		page = await context.new_page()
+		try:
+			await page.goto(url, wait_until="networkidle", timeout=30000)
+			await page.wait_for_timeout(3000)
+			html = await page.content()
+		finally:
+			await browser.close()
+		return html
+
+
 async def build_list_pages(
 	request: SpchCrawlRequest,
 	crawl_all: bool,
@@ -574,6 +589,17 @@ async def build_list_pages(
 			limit=1,
 		)) > 0
 
+	use_playwright = False
+	if not has_list_items(first_html):
+		print(f"[SPCH] httpx 목록 조회 결과 항목 없음 → Playwright 폴백 시도")
+		try:
+			first_html = await fetch_list_html_by_playwright(list_url)
+			use_playwright = True
+			if not has_list_items(first_html):
+				print(f"[SPCH] Playwright 목록 조회에서도 항목 없음")
+		except Exception as e:
+			print(f"[SPCH] Playwright 목록 조회 실패: {e}")
+
 	def make_page_signature(html: str) -> str:
 		candidates = extract_list_candidates(
 			html=html,
@@ -586,6 +612,11 @@ async def build_list_pages(
 			f"{c.get('title', '')}|{c.get('href', '')}|{c.get('onclick', '')}"
 			for c in candidates[:10]
 		)
+
+	async def fetch_next_page(url: str) -> str:
+		if use_playwright:
+			return await fetch_list_html_by_playwright(url)
+		return await fetch_html(url, request.param.ssl_mode)
 
 	current_page_no = 1
 	current_url = list_url
@@ -605,7 +636,7 @@ async def build_list_pages(
 		if link_param_name:
 			next_url = replace_query_param(list_url, link_param_name, str(next_page_no))
 			try:
-				next_html = await fetch_html(next_url, request.param.ssl_mode)
+				next_html = await fetch_next_page(next_url)
 			except Exception:
 				break
 			current_page_no = next_page_no
