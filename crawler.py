@@ -62,8 +62,8 @@ class ScrapeParam(BaseModel):
     search_form_selector:  str           = Field("form#search_form")
     numpr_select_selector: str           = Field("select#th_sch")
     search_btn_selector:   str           = Field("button.btn.blue")
-    page_timeout:          str           = Field("20000")
-    @field_validator("page_timeout", mode="before")
+    timeout:          str           = Field("20000")
+    @field_validator("timeout", mode="before")
     @classmethod
     def default_timeout(cls, v):
         if v is None or str(v).strip() == "": return "20000"
@@ -88,7 +88,7 @@ class LamanParam(BaseModel):
     rasmbly_id:         str            = Field("")
     photo_download:     str            = Field("Y")
     ssl_mode:           str            = Field("Y")
-    page_timeout:       str            = Field("20000")
+    timeout:       str            = Field("20000")
 
 class LastData(BaseModel):
     model_config = {"extra": "allow"}
@@ -883,8 +883,32 @@ async def _extract_bill_attachments(page, view_class, base_url, req, bi_cn, year
                 _, ext = os.path.splitext(resolved_name)
                 if not ext:
                     ct = r.headers.get("content-type", "")
-                    ext = next((v for k,v in {"application/pdf":".pdf","application/msword":".doc","application/haansofthwp":".hwp","application/x-hwp":".hwp","application/zip":".zip"}.items() if k in ct.lower()), ".bin")
-                    resolved_name += ext
+                    ext = next((v for k,v in {
+                        "application/pdf": ".pdf",
+                        "application/msword": ".doc",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml": ".docx",
+                        "application/haansofthwp": ".hwp",
+                        "application/x-hwp": ".hwp",
+                        "application/haansofthwpx": ".hwpx",
+                        "application/zip": ".zip",
+                    }.items() if k in ct.lower()), None)
+                    if ext:
+                        resolved_name += ext
+                    else:
+                        print(f"[*] 확장자 미확인 → Playwright suggested_filename 확인", flush=True)
+                        try:
+                            _url_path = urlparse(full_url).path
+                            _qs_vals  = [v for k, v in parse_qsl(urlparse(full_url).query)]
+                            _sel      = f"a[href*='{_url_path}']" if _url_path else f"a[href*='{_qs_vals[0]}']" if _qs_vals else "a"
+                            link = page.locator(_sel).first
+                            async with page.expect_download(timeout=10000) as dl_info:
+                                await link.click()
+                            dl  = await dl_info.value
+                            ext = os.path.splitext(dl.suggested_filename)[1] or ".bin"
+                            await dl.cancel()
+                        except Exception:
+                            ext = ".bin"
+                        resolved_name += ext
                 save_path = build_save_path(req, year, bi_cn, seq, ext)
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 with open(save_path, "wb") as f: f.write(r.content)
@@ -990,7 +1014,7 @@ async def execute_bill_scraping(req: ScrapeRequest):
                 p.max_pages,p.paging_selector,p.next_btn_selector,p.end_btn_selector,
                 lambda: app.state.stop_scraping,
                 p.search_form_selector,p.numpr_select_selector,p.search_btn_selector,
-                last_sig=last_sig,timeout=int(p.page_timeout))
+                last_sig=last_sig,timeout=int(p.timeout))
         finally:
             await browser.close(); print(f"[*] 1단계 브라우저 종료",flush=True)
         error_logs.extend(collect_errors)
@@ -1010,7 +1034,7 @@ async def execute_bill_scraping(req: ScrapeRequest):
                 is_real=href and not href.startswith(("#","javascript"))
                 target_url=urljoin(p.list_url,href) if is_real else f"{p.view_url}{'&' if '?' in p.view_url else '?'}{p.view_id_param}={vid}"
                 try:
-                    detail_html=await _extract_bill_detail_html(page,p.view_class,target_url,timeout=int(p.page_timeout))
+                    detail_html=await _extract_bill_detail_html(page,p.view_class,target_url,timeout=int(p.timeout))
                     parsed_u=urlparse(target_url); base=f"{parsed_u.scheme}://{parsed_u.netloc}"
                     bi_cn=str(time.time_ns())[:16]
                     list_title=item.get("BI_SJ","")
@@ -1022,7 +1046,7 @@ async def execute_bill_scraping(req: ScrapeRequest):
                             file_result=await _extract_bill_attachments(page,p.view_class,base,req,bi_cn,year,items=req.item)
                         except Exception as e:
                             print(f"    [!] 첨부파일 수집 실패: {str(e)[:100]}",flush=True); file_result={}
-                            try: await page.goto(target_url,wait_until="domcontentloaded",timeout=int(p.page_timeout))
+                            try: await page.goto(target_url,wait_until="domcontentloaded",timeout=int(p.timeout))
                             except Exception: pass
                         detail["BI_FILE_NM"]   = file_result.get("BI_FILE_NM",  "")
                         detail["BI_FILE_PATH"] = file_result.get("BI_FILE_PATH","")
@@ -1070,7 +1094,7 @@ async def execute_bill_scraping_test(req: ScrapeRequest):
         browser,page=await _setup_browser(playwright)
         try:
             print(f"[TEST] 리스트 수집: {p.list_url}",flush=True)
-            await page.goto(p.list_url,wait_until="domcontentloaded",timeout=int(p.page_timeout))
+            await page.goto(p.list_url,wait_until="domcontentloaded",timeout=int(p.timeout))
             if p.rasmbly_numpr and p.rasmbly_numpr.strip():
                 await BillListCrawler.apply_filter_and_search(page,p.rasmbly_numpr.strip(),p.list_class,p.search_form_selector,p.numpr_select_selector,p.search_btn_selector)
             else:
@@ -1084,7 +1108,7 @@ async def execute_bill_scraping_test(req: ScrapeRequest):
                 target_url=urljoin(p.list_url,href) if is_real else f"{p.view_url}{'&' if '?' in p.view_url else '?'}{p.view_id_param}={vid}"
                 print(f"[TEST] 상세 수집: {vid}",flush=True)
                 try:
-                    detail_html=await _extract_bill_detail_html(page,p.view_class,target_url,timeout=int(p.page_timeout))
+                    detail_html=await _extract_bill_detail_html(page,p.view_class,target_url,timeout=int(p.timeout))
                     bi_cn=str(time.time_ns())[:16]
                     detail=parse_detail_by_items(detail_html,req.item,list_title=item.get("BI_SJ",""))
                     if not detail.get("RASMBLY_NUMPR") and p.rasmbly_numpr: detail["RASMBLY_NUMPR"]=str(p.rasmbly_numpr)
@@ -1095,7 +1119,7 @@ async def execute_bill_scraping_test(req: ScrapeRequest):
                             file_result=await _extract_bill_attachments(page,p.view_class,base,req,bi_cn,year,items=req.item)
                         except Exception as e:
                             print(f"    [!] 첨부파일 수집 실패: {str(e)[:100]}",flush=True); file_result={}
-                            try: await page.goto(target_url,wait_until="domcontentloaded",timeout=int(p.page_timeout))
+                            try: await page.goto(target_url,wait_until="domcontentloaded",timeout=int(p.timeout))
                             except Exception: pass
                         detail["BI_FILE_NM"]   = file_result.get("BI_FILE_NM",  "")
                         detail["BI_FILE_PATH"] = file_result.get("BI_FILE_PATH","")
@@ -1262,7 +1286,7 @@ async def _get_profile_detail_html(page, uid: str, base_url: str,
 async def execute_laman_scraping(req: LamanRequest):
     app.state.stop_scraping = False
     p = req.param
-    timeout  = int(p.page_timeout)
+    timeout  = int(p.timeout)
     parsed_b = urlparse(p.list_url)
     base_url = f"{parsed_b.scheme}://{parsed_b.netloc}"
     data, error_logs = [], []
@@ -1372,17 +1396,19 @@ async def _do_send(target_url, payload):
 
 # ── FastAPI 라우터 ────────────────────────────────────────────────
 def _route_request(raw: UnifiedRequest):
-    if raw.type == "minutes":
-        return MinutesRequest(req_id=raw.req_id, crw_id=raw.crw_id, type=raw.type,
-                              last_data=raw.last_data, file_dir=raw.file_dir,
-                              param=MinutesParam(**raw.param), item=raw.item)
+    # if raw.type == "minutes":
+    #     return MinutesRequest(req_id=raw.req_id, crw_id=raw.crw_id, type=raw.type,
+    #                           last_data=raw.last_data, file_dir=raw.file_dir,
+    #                           param=MinutesParam(**raw.param), item=raw.item)
     if raw.type == "laman":
         return LamanRequest(req_id=raw.req_id, crw_id=raw.crw_id, type=raw.type,
                             file_dir=raw.file_dir, param=LamanParam(**raw.param),
                             item=raw.item, last_data=raw.last_data)
-    return ScrapeRequest(req_id=raw.req_id, type=raw.type, crw_id=raw.crw_id, file_dir=raw.file_dir,
-                         param=ScrapeParam(**raw.param), item=raw.item,
-                         last_data=LastData(**raw.last_data) if raw.last_data else None)
+    if raw.type == "bill":
+        return ScrapeRequest(req_id=raw.req_id, type=raw.type, crw_id=raw.crw_id, file_dir=raw.file_dir,
+                             param=ScrapeParam(**raw.param), item=raw.item,
+                             last_data=LastData(**raw.last_data) if raw.last_data else None)
+    raise ValueError(f"지원하지 않는 type: '{raw.type}' (bill / minutes / laman 중 하나여야 합니다)")
 
 @app.post("/crawl", status_code=202)
 async def crawl(raw: UnifiedRequest, background_tasks: BackgroundTasks):
