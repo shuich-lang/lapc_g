@@ -83,12 +83,10 @@ class LamanParam(BaseModel):
     list_url:           str            = Field(...)
     list_class:         str            = Field("div.profile_wrap")
     profile_selector:   str            = Field("a.btn_profile")
-    detail_url_pattern: Optional[str]  = None
-    rasmbly_numpr:      str            = Field("")
-    rasmbly_id:         str            = Field("")
-    photo_download:     str            = Field("Y")
+    view_url:           Optional[str]  = None
+    view_class:         Optional[str]  = None
     ssl_mode:           str            = Field("Y")
-    timeout:       str            = Field("20000")
+    timeout:            str            = Field("20000")
 
 class LastData(BaseModel):
     model_config = {"extra": "allow"}
@@ -1202,7 +1200,7 @@ async def execute_minutes_scraping(request: MinutesRequest):
     return {"req_id":request.req_id,"type":request.type,"crw_id":request.crw_id,"ok":True,"data_count":len(data),"saved_file":filepath}
 
 # ── laman 의원정보 수집 엔진 ──────────────────────────────────────
-async def _download_photo(photo_url: str, base_url: str, req: LamanRequest, asemby_id: str) -> tuple:
+async def _download_photo(photo_url: str, base_url: str, req: LamanRequest) -> tuple:
     full_url = urljoin(base_url, photo_url)
     try:
         async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT},
@@ -1212,12 +1210,10 @@ async def _download_photo(photo_url: str, base_url: str, req: LamanRequest, asem
             r = await client.get(full_url); r.raise_for_status()
         _, ext = os.path.splitext(urlparse(full_url).path)
         if not ext: ext = ".jpg"
-        rasmbly_id = req.param.rasmbly_id or "000000"
-        numpr      = req.param.rasmbly_numpr or "0"
-        save_dir   = os.path.join("/", req.file_dir, "assemblyinfo", rasmbly_id, numpr)
+        save_dir = os.path.join("/", req.file_dir, "assemblyinfo", req.crw_id)  # ← 수정
         os.makedirs(save_dir, exist_ok=True)
-        file_nm    = f"{asemby_id}{ext}"
-        save_path  = os.path.join(save_dir, file_nm)
+        file_nm  = f"{req.crw_id}{ext}"
+        save_path = os.path.join(save_dir, file_nm)
         if not os.path.exists(save_path):
             with open(save_path, "wb") as f: f.write(r.content)
         return save_path.replace("\\", "/"), file_nm
@@ -1226,10 +1222,11 @@ async def _download_photo(photo_url: str, base_url: str, req: LamanRequest, asem
         return "", ""
 
 async def _get_profile_detail_html(page, uid: str, base_url: str,
-                                    detail_url_pattern: Optional[str], timeout: int) -> str:
-    # detail_url_pattern 있으면 직접 URL 접근
-    if detail_url_pattern:
-        detail_url = urljoin(base_url, detail_url_pattern.replace("{uid}", uid))
+                                    view_url: Optional[str],
+                                    view_class: Optional[str],
+                                    timeout: int) -> str:
+    if view_url:
+        detail_url = urljoin(base_url, view_url.replace("{uid}", uid))
         try:
             await page.goto(detail_url, wait_until="domcontentloaded", timeout=timeout)
             return await page.content()
@@ -1237,51 +1234,41 @@ async def _get_profile_detail_html(page, uid: str, base_url: str,
             print(f"[-] 상세 URL 접근 실패 ({detail_url}): {e}", flush=True)
             return ""
 
-    btn = page.locator(f"[data-uid='{uid}']").first
-    if await btn.count() == 0:
-        print(f"[-] btn_profile not found (uid={uid})", flush=True)
-        return ""
+    # ── 이전 모달 닫기: on 클래스 제거로 즉시 처리 ──────────────
+    if view_class:
+        try:
+            await page.evaluate(f"""
+                const el = document.querySelector('{view_class}');
+                if (el) el.classList.remove('on');
+            """)
+        except Exception: pass
 
-    # 모달/레이어 방식
-    try:
-        # 이전 모달이 열려있으면 먼저 닫기
-        close_sels = ["button.close", "a.close", ".btn_close", ".pop_close",
-                      "[class*='close']", "div.mask"]
-        for csel in close_sels:
-            try:
-                el = await page.query_selector(csel)
-                if el and await el.is_visible():
-                    await el.click()
-                    await page.wait_for_timeout(300)
-                    break
-            except Exception:
-                continue
+    # ── 클릭 → 팝업 대기 ─────────────────────────────────────────
+    await page.evaluate(f"document.querySelector('[data-uid=\"{uid}\"]')?.click()")
 
-        # JS로 직접 클릭 (마스크 레이어 우회)
-        await page.evaluate(f"document.querySelector('[data-uid=\"{uid}\"]')?.click()")
-        await page.wait_for_timeout(500)
+    if view_class:
+        try:
+            await page.wait_for_selector(view_class, timeout=2000, state="visible")
+            el = await page.query_selector(view_class)
+            if el and await el.is_visible():
+                print(f"[+] view_class 방식 성공 (uid={uid}, sel={view_class})", flush=True)
+                return await el.inner_html()
+        except Exception as e:
+            print(f"[!] view_class 실패, fallback (uid={uid}): {e}", flush=True)
 
-        # 모달 셀렉터 순서대로 탐색
-        modal_sels = ["div#profile_layer_popup", "div.pop_profile",
-                      "div.info", "div.profile_detail", "div.member_info",
-                      "div.popup", "div.layer", "div#layerPop", "div.modal"]
-        for sel in modal_sels:
-            try:
-                await page.wait_for_selector(sel, timeout=2000, state="visible")
-                el = await page.query_selector(sel)
-                if el and await el.is_visible():
-                    html = await el.inner_html()
-                    print(f"[+] 모달 방식 성공 (uid={uid}, sel={sel})", flush=True)
-                    return html
-            except Exception:
-                continue
+    # ── fallback: 기존 순회 ───────────────────────────────────────
+    for sel in ["div#profile_layer_popup", "div.pop_profile", "div.info", "div.profile_detail",
+                "div.member_info", "div.popup", "div.layer", "div#layerPop", "div.modal"]:
+        try:
+            await page.wait_for_selector(sel, timeout=2000, state="visible")
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                print(f"[+] 모달 방식 성공 (uid={uid}, sel={sel})", flush=True)
+                return await el.inner_html()
+        except Exception: continue
 
-        await page.wait_for_timeout(500)
-        print(f"[+] 페이지 전체 반환 (uid={uid})", flush=True)
-        return await page.content()
-    except Exception as e:
-        print(f"[-] 모달 방식 실패 (uid={uid}): {e}", flush=True)
-        return ""
+    print(f"[+] 페이지 전체 반환 (uid={uid})", flush=True)
+    return await page.content()
 
 async def execute_laman_scraping(req: LamanRequest):
     app.state.stop_scraping = False
@@ -1336,10 +1323,9 @@ async def execute_laman_scraping(req: LamanRequest):
                 uid  = m["uid"]
                 name = m["name"]
                 print(f"[LAMAN] ({idx+1}/{len(members)}) {name} (uid={uid})", flush=True)
-                asemby_id = f"{p.rasmbly_id}_{uid}" if p.rasmbly_id else uid
 
                 detail_html = await _get_profile_detail_html(
-                    page, uid, base_url, p.detail_url_pattern, timeout)
+                    page, uid, base_url, p.view_url, p.view_class, timeout)
 
                 # item[] regex 파싱
                 parsed = parse_detail_by_items(detail_html, req.item) if detail_html else {}
@@ -1351,21 +1337,17 @@ async def execute_laman_scraping(req: LamanRequest):
                 # 사진 다운로드
                 photo_url  = parsed.get("PHOTO_FILE_URL") or m["photo_url"]
                 photo_nm   = parsed.get("PHOTO_FILE_NM")  or m["photo_alt"] or name
-                photo_path = ""
-                if p.photo_download == "Y" and photo_url:
-                    photo_path, dl_nm = await _download_photo(photo_url, base_url, req, asemby_id)
-                    if dl_nm: photo_nm = dl_nm
+                photo_path, dl_nm = await _download_photo(photo_url, base_url, req)
+                if dl_nm: photo_nm = dl_nm
 
                 parsed.update({
-                    "ASEMBY_ID":       asemby_id,
-                    "RASMBLY_ID":      p.rasmbly_id,
-                    "RASMBLY_NUMPR":   p.rasmbly_numpr,
+                    "RASMBLY_ID":      req.crw_id,
                     "PHOTO_FILE_URL":  urljoin(base_url, photo_url) if photo_url else "",
                     "PHOTO_FILE_NM":   photo_nm,
                     "PHOTO_FILE_PATH": photo_path,
                     "CUD_CODE":        "C",
                     "ISVIEW":          "Y",
-                    "ASEMBY_CN":       parsed.get("ASEMBY_CN") or p.rasmbly_numpr,
+                    "ASEMBY_CN":       parsed.get("ASEMBY_CN") or "",
                     "FRST_REGIST_DT":  datetime.now().strftime("%Y%m%d%H%M%S"),
                 })
                 data.append(parsed)
