@@ -30,6 +30,7 @@ _DATE_PATTERN         = re.compile(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})')
 _FILE_SKIP_COLS = {"BI_FILE_NM", "BI_FILE_URL", "BI_FILE_PATH", "BI_FILE_ID"}
 _LAST_DATA_MATCH_KEYS = ["URL", "BI_SJ", "BI_CN", "BI_NO"]
 _POLICY_FILE_COLS = {"ORG_FILE_NM", "DOWNPATH", "DOWNID", "DOWN_URL"}
+MAX_FILE_SIZE_BYTES   = 20 * 1024 * 1024   # 20MB
 
 # ── BI_NO / RASMBLY_NUMPR_SESN 파서 ──────────────────────────────
 _P_BI_NO_SESN        = re.compile(r'^(.+?)\s*[\(\（]제\s*(\d+)\s*회[\)\）]')
@@ -101,7 +102,9 @@ class PolicyParam(BaseModel):
     paging_selector:       str           = Field("div#pagingNav")
     next_btn_selector:     str           = Field("a.num_right")
     end_btn_selector:      str           = Field("a.num_last")
-    timeout:          str           = Field("20000")
+    bbs_id:                str           = Field("0")
+    bbs_name:              str           = Field("0")
+    timeout:               str           = Field("20000")
     @field_validator("timeout", mode="before")
     @classmethod
     def default_timeout(cls, v):
@@ -386,6 +389,16 @@ def build_file_save_path(file_dir, crawl_type, crw_id, rasmbly_numpr, year, mint
     if ext not in FILE_EXTENSIONS: ext = "bin"
     safe = re.sub(r'[\\/:*?"<>|\s]+', "_", normalize_text(rasmbly_numpr) if rasmbly_numpr else "unknown")
     return os.path.join(file_dir, crawl_type, crw_id or "unknown", safe, year, f"{mints_cn}_{seq}.{ext}")
+
+def build_policy_save_path(req, year, outbbs_cn, seq, ext):
+    p = req.param
+    bbs_id   = p.bbs_id   or "0"
+    bbs_name = p.bbs_name or "0"
+    path = os.path.join("/", req.file_dir, f"{req.type}info",
+                        bbs_id, bbs_name, year,
+                        f"{outbbs_cn}_attach_{seq}{ext}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
 
 # ── HTTP 유틸 ─────────────────────────────────────────────────────
 async def fetch_html(url, ssl_mode):
@@ -683,7 +696,10 @@ class BillListCrawler:
         if m: return m.group(1)
         js=onclick or (href if href and href.startswith("javascript") else "")
         if js:
-            m=re.search(r"\(['\"]?([^'\"),]+)['\"]?\)",js)
+            if view_id_param:
+                m = re.search(r"[a-zA-Z_]+\s*\(\s*'[^']*'\s*,\s*'(\d+)'", js)
+                if m: return m.group(1)
+            m = re.search(r"\(['\"]?([^'\"),]+)['\"]?\)", js)
             if m: return m.group(1)
         m=re.search(r"onclick\s*=\s*[\"'][a-zA-Z0-9_]+\([\"']([^\"']+)[\"']\)",row_html)
         if m: return m.group(1)
@@ -716,7 +732,7 @@ class BillListCrawler:
         await page.wait_for_selector(selector,timeout=5000)
         items=[]
         for row in await page.query_selector_all(f"{selector} tbody > tr, {selector} ul > li, {selector} .list_row"):
-            tds=await row.query_selector_all("td") or await row.query_selector_all("div, span")
+            tds=await row.query_selector_all("td") or await row.query_selector_all("div, span, p")
             if not tds: continue
             item={"row_texts":[clean_text(await td.inner_text()) for td in tds]}
             link=await BillListCrawler._get_row_link(row,tds)
@@ -769,24 +785,61 @@ class BillListCrawler:
         return errors
 
     @staticmethod
-    async def get_total_pages(page,end_btn_selector=None):
+    async def get_total_pages(page, end_btn_selector=None):
+        _page_re = re.compile(
+            r'(?:fn[a-zA-Z_]*|pageIndex|pageNum|pageNo|page|go|move|schPageNo|cp)\s*[\(=]\s*[\'"]?(\d+)[\'"]?'
+            r'|[?&]page=(\d+)',
+            re.IGNORECASE)
+
+        async def _extract_num(el):
+            """el 또는 부모 a/button에서 페이지 번호 추출"""
+            src = " ".join(filter(None, [
+                await el.get_attribute("href")    or "",
+                await el.get_attribute("onclick") or "",
+                await el.inner_text()             or "",
+            ]))
+            # src가 비어있으면(img 등) 부모 a/button 탐색
+            if not src.strip():
+                try:
+                    parent = await el.evaluate_handle("node => node.closest('a, button')")
+                    p = parent.as_element()
+                    if p:
+                        src = " ".join(filter(None, [
+                            await p.get_attribute("href")    or "",
+                            await p.get_attribute("onclick") or "",
+                        ]))
+                except Exception:
+                    pass
+            m = _page_re.search(src)
+            if m:
+                val = int(next(g for g in m.groups() if g is not None))
+                return val if val > 1 else None
+            return None
+
         try:
-            ex=["a.last","a.num_last","a.btn-last","a.direction.last","a.btn.end","a.btn.next","a.next",
-                "a[title*='마지막']","a[onclick*='Retrieve']","a.l_font","a:has-text('»')","a:has-text('>>') "]
-            sels=([end_btn_selector]+[s for s in ex if s!=end_btn_selector]) if end_btn_selector else ex
-            for btn in reversed(await page.query_selector_all(", ".join(sels))):
-                combined=f"{await btn.get_attribute('href') or ''} {await btn.get_attribute('onclick') or ''} {await btn.inner_text() or ''}"
-                m=re.search(r'(?:fn[a-zA-Z_]*|pageIndex|pageNum|pageNo|page|go|move|schPageNo|cp)\s*[\(=]\s*[\'"]?(\d+)[\'"]?',combined,re.IGNORECASE)
-                if m and int(m.group(1))>1: return int(m.group(1))
-            mx=1
-            for b in await page.query_selector_all(".paging a,.paging2 a,.pagination a,#pagingNav a,.paging strong"):
-                t=(await b.inner_text()).strip()
-                if t.isdigit(): mx=max(mx,int(t))
-                href = await b.get_attribute("href") or ""
-                mm = re.search(r'[?&]page=(\d+)', href)
-                if mm: mx = max(mx, int(mm.group(1)))
+            # end_btn_selector 있으면 우선 시도
+            if end_btn_selector:
+                try:
+                    el = await page.query_selector(normalize_selector(end_btn_selector))
+                    if el:
+                        val = await _extract_num(el)
+                        if val: return val
+                except Exception:
+                    pass
+
+            # fallback: 페이지 내 모든 a/button 순회 → 최댓값
+            mx = 1
+            for el in await page.query_selector_all("a, button"):
+                try:
+                    val = await _extract_num(el)
+                    if val: mx = max(mx, val)
+                except Exception:
+                    continue
             return mx
-        except Exception as e: print(f"[-] 페이지 수 탐지 실패: {e}",flush=True); return 1
+
+        except Exception as e:
+            print(f"[-] 페이지 수 탐지 실패: {e}", flush=True)
+            return 1
 
     @staticmethod
     async def go_to_page(page,next_page,paging_sel,next_btn_sel):
@@ -808,7 +861,6 @@ class BillListCrawler:
         except Exception as e: print(f"[!] 페이지 이동 실패: {e}",flush=True)
         return False
 
-# 수정
 async def _collect_pages(page, list_url, numpr="", list_class="", vid_param="", 
                          max_pages="", paging_sel="", next_btn_sel="", end_btn_sel="",
                          stop_check=None, search_form_selector="", numpr_select_selector="",
@@ -820,7 +872,7 @@ async def _collect_pages(page, list_url, numpr="", list_class="", vid_param="",
     if numpr and numpr.strip():
         collect_errors.extend(await BillListCrawler.apply_filter_and_search(page,numpr.strip(),list_class,search_form_selector,numpr_select_selector,search_btn_selector))
     else:
-        await page.wait_for_selector(normalize_selector(list_class),timeout=2000)
+        await page.wait_for_selector(normalize_selector(list_class),timeout=5000)
     total=await BillListCrawler.get_total_pages(page,end_btn_sel)
     safe_max=int(max_pages.strip()) if max_pages and max_pages.strip().isdigit() else 0
     target=total if safe_max==0 else min(safe_max,total)
@@ -865,8 +917,9 @@ async def _extract_bill_detail_html(page,view_class,target_url,timeout=30000):
 async def _extract_bill_attachments(page, view_class, base_url, req, bi_cn, year, items=None):
     detail_url = page.url
     if not items: return {}
-    file_nm_item  = next((i for i in items if i.col == "BI_FILE_NM"),  None)
-    file_url_item = next((i for i in items if i.col == "BI_FILE_URL"), None)
+    # bill: BI_FILE_NM / policy: ORG_FILE_NM 둘 다 허용
+    file_nm_item  = next((i for i in items if i.col in ("BI_FILE_NM", "ORG_FILE_NM")), None)
+    file_url_item = next((i for i in items if i.col in ("BI_FILE_URL", "DOWNURL")),    None)
     if not file_nm_item: return {}
 
     attach_td = None
@@ -1028,6 +1081,239 @@ def _extract_all_matches(html: str, patterns: list) -> list:
 _VIEWER_URL_PATTERNS = ["viewer","synap","htmlViewer","previewAjax","pdf.do","hwpViewer"]
 def _is_viewer_url(url: str) -> bool:
     return any(p in url for p in _VIEWER_URL_PATTERNS)
+
+async def _extract_policy_attachments(page, view_class, base_url, req, outbbs_cn, year, items=None):
+    """policy 전용 첨부파일 수집."""
+    detail_url = page.url
+    if not items: return {}
+ 
+    file_nm_item  = next((i for i in items if i.col == "ORG_FILE_NM"), None)
+    file_url_item = next((i for i in items if i.col == "DOWNURL"),     None)
+ 
+    skip_kw   = ["바로보기","미리보기","뷰어","preview","바로가기"]
+    viewer_oc = ["goPreview","preview","viewer"]
+    viewer_cl = ["btn-board","preview","view"]
+ 
+    attachments = []
+ 
+    # ── 방법 1: DOWNURL regex로 URL 추출 → 해당 링크 클릭 ────────
+    if file_url_item and file_url_item.regex:
+        detail_html = await page.content()
+        if view_class:
+            try:
+                el = await page.query_selector(normalize_selector(view_class))
+                if el: detail_html = await el.inner_html()
+            except Exception: pass
+ 
+        raw_urls  = _extract_all_matches(detail_html, file_url_item.regex)
+        raw_names = _extract_all_matches(detail_html, file_nm_item.regex) if file_nm_item and file_nm_item.regex else []
+        raw_urls = raw_urls[:len(raw_names)] if raw_names else raw_urls[:1]
+
+        # URL 중복 제거
+        seen, deduped_urls, deduped_names = set(), [], []
+        for i, u in enumerate(raw_urls):
+            if u not in seen:
+                seen.add(u)
+                deduped_urls.append(u)
+                deduped_names.append(raw_names[i] if i < len(raw_names) else "")
+        raw_urls, raw_names = deduped_urls, deduped_names
+ 
+        for seq, raw_url in enumerate(raw_urls, start=1):
+            raw_url_clean = raw_url.strip().replace("&amp;", "&")
+            hint_name = normalize_text(raw_names[seq-1] if seq-1 < len(raw_names) else "")
+            print(f"[*] [POLICY] 다운로드 시도: {hint_name or raw_url_clean}", flush=True)
+
+            save_path, resolved_name = "", hint_name
+
+            # ── JS 함수 호출문 여부 판단 ──────────────────────────────
+            is_js_call = not raw_url_clean.startswith(("http", "/", "./", "../")) and "(" in raw_url_clean
+            full_url = raw_url_clean if is_js_call else urljoin(base_url, raw_url_clean)
+
+            try:
+                if is_js_call:
+                    # onclick 값에 해당 문자열이 포함된 링크 탐색
+                    # raw_url_clean 에서 고유값(숫자 인자) 추출해 셀렉터 구성
+                    args = re.findall(r"[\'\"]?(\d+)[\'\"]?", raw_url_clean)
+                    link_sel = None
+                    for arg in reversed(args):  # 뒤쪽 인자일수록 고유값
+                        candidate = f"a[onclick*='{arg}']"
+                        try:
+                            if await page.locator(candidate).count() == 1:
+                                link_sel = candidate; break
+                        except Exception: continue
+                    if not link_sel and args:
+                        link_sel = f"a[onclick*='{args[-1]}']"
+                    if not link_sel:
+                        raise ValueError(f"JS 링크 셀렉터 없음: {raw_url_clean}")
+                else:
+                    # 실제 URL → httpx 직접 다운로드
+                    full_url = urljoin(base_url, raw_url_clean)
+                    try:
+                        async with httpx.AsyncClient(
+                                headers={"User-Agent": USER_AGENT},
+                                timeout=httpx.Timeout(60.0, connect=10.0),
+                                follow_redirects=True, verify=certifi.where()) as client:
+                            r = await client.get(full_url); r.raise_for_status()
+                        if len(r.content) > MAX_FILE_SIZE_BYTES:
+                            print(f"[*] [POLICY] 크기 초과 → 스킵: {hint_name}", flush=True)
+                        else:
+                            cd = r.headers.get("content-disposition", "")
+                            cd_name = None
+                            if cd:
+                                m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)',
+                                              cd, re.IGNORECASE)
+                                if m: cd_name = unquote(m.group(1).strip())
+                            resolved_name = normalize_text(hint_name or cd_name) or f"file_{seq}"
+                            _, ext = os.path.splitext(resolved_name)
+                            if not ext: ext = ".bin"
+                            save_path = build_policy_save_path(req, year, outbbs_cn, seq, ext)
+                            with open(save_path, "wb") as f: f.write(r.content)
+                            save_path = save_path.replace("\\", "/")
+                            print(f"[+] [POLICY] 저장: {resolved_name} → {save_path}", flush=True)
+                    except Exception as e:
+                        print(f"[-] [POLICY] httpx 실패 ({full_url}): {str(e)[:120]}", flush=True)
+                    attachments.append({"original_name": resolved_name, "file_path": save_path,
+                                         "file_id": str(seq), "url": full_url})
+                    continue  # Playwright 클릭 블록 건너뜀
+                
+                link = page.locator(link_sel).first
+                if await link.count() == 0:
+                    raise ValueError(f"링크 없음: {link_sel}")
+
+                await link.evaluate("node => node.removeAttribute('target')")
+
+                async def _do_download():
+                    async with page.expect_download(timeout=30000) as dl_info:
+                        await link.click()
+                    dl = await dl_info.value
+                    _, ext = os.path.splitext(dl.suggested_filename or hint_name or "")
+                    if not ext: ext = ".bin"
+                    name = dl.suggested_filename or hint_name or f"file_{seq}"
+                    path = build_policy_save_path(req, year, outbbs_cn, seq, ext)
+                    await dl.save_as(path)
+                    return name, path, dl.url
+
+                try:
+                    resolved_name, save_path, full_url = await asyncio.wait_for(_do_download(), timeout=7.0)
+                    file_size = os.path.getsize(save_path)
+                    if file_size > MAX_FILE_SIZE_BYTES:
+                        os.remove(save_path); save_path = ""
+                        print(f"[*] [POLICY] 크기 초과 ({file_size/1024/1024:.1f}MB) → 삭제: {resolved_name}", flush=True)
+                    else:
+                        save_path = save_path.replace("\\", "/")
+                        print(f"[+] [POLICY] 저장: {resolved_name} → {save_path}", flush=True)
+                except asyncio.TimeoutError:
+                    print(f"[*] [POLICY] 타임아웃 → 스킵: {hint_name}", flush=True)
+                    save_path = ""
+                    try:
+                        await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+                        await page.wait_for_timeout(300)
+                    except Exception: pass
+
+            except Exception as e:
+                print(f"[-] [POLICY] 실패 ({raw_url_clean}): {str(e)[:120]}", flush=True)
+                try:
+                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(300)
+                except Exception: pass
+
+            attachments.append({
+                "original_name": resolved_name,
+                "file_path":     save_path,
+                "file_id":       str(seq),
+                "url":           full_url,
+            })
+        if attachments:
+            return _pack_attachment_result(attachments)
+ 
+    # ── 방법 2: view_class 내 a 태그 순회 클릭 fallback ──────────
+    root = page
+    if view_class:
+        try:
+            el = await page.query_selector(normalize_selector(view_class))
+            if el: root = el
+        except Exception: pass
+ 
+    seen_urls, seq = set(), 0
+    for el in await root.query_selector_all("a"):
+        href     = await el.get_attribute("href") or ""
+        onclick  = await el.get_attribute("onclick") or ""
+        el_class = await el.get_attribute("class") or ""
+        raw      = clean_text(await el.inner_text())
+ 
+        if not raw: continue
+        if href in ("#", "") and not onclick: continue
+        if any(k in raw     for k in skip_kw): continue
+        if any(k in onclick for k in viewer_oc): continue
+        if any(k in el_class for k in viewer_cl): continue
+        if any(k in href    for k in ["viewer","synap","htmlViewer"]): continue
+ 
+        normalized_url = urljoin(base_url, href.replace("&amp;","&")) if href else ""
+        if normalized_url in seen_urls: continue
+        if normalized_url: seen_urls.add(normalized_url)
+ 
+        print(f"[*] [POLICY fallback] 다운로드 시도: {raw}", flush=True)
+        try:
+            await el.evaluate("node => node.removeAttribute('target')")
+ 
+            async def _do_fallback_download():
+                async with page.expect_download(timeout=10000) as dl_info:
+                    await el.click()
+                dl = await dl_info.value
+                _, ext = os.path.splitext(dl.suggested_filename or "")
+                if not ext: ext = ".bin"
+                name = dl.suggested_filename or raw
+                path = build_policy_save_path(req, year, outbbs_cn, seq + 1, ext)
+                await asyncio.wait_for(dl.save_as(path), timeout=10.0)
+                return name, path, dl.url
+ 
+            try:
+                seq += 1
+                resolved_name, save_path, dl_url = await asyncio.wait_for(_do_fallback_download(), timeout=10.0)
+                file_size = os.path.getsize(save_path)
+                if file_size > MAX_FILE_SIZE_BYTES:
+                    os.remove(save_path); save_path = ""
+                    print(f"[*] [POLICY fallback] 크기 초과 ({file_size/1024/1024:.1f}MB) → 삭제: {resolved_name}", flush=True)
+                else:
+                    save_path = save_path.replace("\\", "/")
+                    print(f"[+] [POLICY fallback] 저장: {save_path}", flush=True)
+                attachments.append({"original_name": resolved_name, "file_path": save_path,
+                                     "file_id": str(seq), "url": dl_url})
+            except asyncio.TimeoutError:
+                print(f"[*] [POLICY fallback] 10초 초과 → 스킵: {raw}", flush=True)
+                attachments.append({"original_name": raw, "file_path": "",
+                                     "file_id": str(seq), "url": normalized_url})
+                try:
+                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(300)
+                except Exception: pass
+ 
+        except Exception as e:
+            print(f"[-] [POLICY fallback] 건너뜀 ({raw}): {str(e)[:100]}", flush=True)
+            seq += 1
+            attachments.append({"original_name": raw, "file_path": "",
+                                 "file_id": str(seq), "url": normalized_url})
+            try:
+                await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(300)
+            except Exception: pass
+ 
+    return _pack_attachment_result(attachments) if attachments else {}
+ 
+ 
+def _pack_attachment_result(attachments: list) -> dict:
+    """첨부파일 리스트 → policy DB 컬럼 dict 변환"""
+    names = [a["original_name"] for a in attachments]
+    paths = [a["file_path"]     for a in attachments]
+    ids   = [a["file_id"]       for a in attachments]
+    urls  = [a["url"]           for a in attachments]
+    def one_or_json(lst): return lst[0] if len(lst) == 1 else json.dumps(lst, ensure_ascii=False)
+    return {
+        "ORG_FILE_NM": one_or_json(names),
+        "DOWNPATH":    one_or_json(paths),
+        "DOWNID":      one_or_json(ids),
+        "DOWNURL":     one_or_json(urls),
+    }
 
 # ── bill 실행 엔진 ────────────────────────────────────────────────
 async def execute_bill_scraping(req: ScrapeRequest):
@@ -1445,12 +1731,6 @@ def parse_policy_detail(detail_html: str, items, list_title: str = None) -> dict
             result[key] = value if value is not None else ""
     return result
  
- 
-def _remap_policy_file_keys(file_result: dict) -> dict:
-    """_extract_bill_attachments 결과의 BI_FILE_* 키를 policy 컬럼명으로 변환"""
-    return {_POLICY_FILE_COLS.get(k, k): v for k, v in file_result.items()}
- 
- 
 # ── policy 실행 엔진 ──────────────────────────────────────────────
 async def execute_policy_scraping(req: PolicyRequest):
     app.state.stop_scraping = False
@@ -1461,9 +1741,7 @@ async def execute_policy_scraping(req: PolicyRequest):
     if last_sig:
         print(f"[POLICY] 추가수집 모드: {last_sig}", flush=True)
  
-    has_file_item = any(
-        i.col in _POLICY_FILE_COLS for i in req.item
-    )
+    has_file_item = any(i.col in _POLICY_FILE_COLS for i in req.item)
  
     async with async_playwright() as playwright:
         # ── 1단계: 리스트 수집 ────────────────────────────────────
@@ -1472,20 +1750,23 @@ async def execute_policy_scraping(req: PolicyRequest):
         try:
             list_data, collect_errors, last_data_reached = await _collect_pages(
                 page, p.list_url,
-                list_class     = p.list_class,
-                vid_param      = p.view_id_param,
-                max_pages      = p.max_pages,
-                paging_sel     = p.paging_selector,
-                next_btn_sel   = p.next_btn_selector,
-                end_btn_sel    = p.end_btn_selector,
-                stop_check     = lambda: app.state.stop_scraping,
-                numpr          = "",     # 미사용
-                search_form_selector  = "",     # 미사용
-                numpr_select_selector = "",     # 미사용
-                search_btn_selector   = "",     # 미사용
-                last_sig       = last_sig,
-                timeout        = int(p.timeout),
+                numpr                 = "",
+                list_class            = p.list_class,
+                vid_param             = p.view_id_param,
+                max_pages             = p.max_pages,
+                paging_sel            = p.paging_selector,
+                next_btn_sel          = p.next_btn_selector,
+                end_btn_sel           = p.end_btn_selector,
+                stop_check            = lambda: app.state.stop_scraping,
+                search_form_selector  = "",
+                numpr_select_selector = "",
+                search_btn_selector   = "",
+                last_sig              = last_sig,
+                timeout               = int(p.timeout),
             )
+        except Exception as e:
+            print(f"[POLICY] 리스트 수집 에러: {e}", flush=True)
+            list_data, collect_errors, last_data_reached = [], [], False
         finally:
             await browser.close()
             print("[POLICY] 1단계 브라우저 종료", flush=True)
@@ -1523,42 +1804,90 @@ async def execute_policy_scraping(req: PolicyRequest):
                     parsed_u = urlparse(target_url)
                     base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
  
-                    outbbs_cn = f"CLIKC{str(time.time_ns())[:16]}"
+                    outbbs_cn  = f"CLIKC{str(time.time_ns())[:16]}"
                     list_title = list_item.get("BI_SJ", "")
- 
-                    # policy 전용 파싱 (CONTENT 원문, CDATE 포맷)
-                    detail = parse_policy_detail(detail_html, req.item, list_title=list_title)
- 
-                    # 파일 첨부 수집 (bill 함수 재사용 → 키 변환)
-                    if has_file_item and not detail.get("DOWNPATH"):
-                        year = (detail.get("CDATE") or "")[:4] or str(datetime.now().year)
+                    detail     = parse_policy_detail(detail_html, req.item, list_title=list_title)
+                    year = str(datetime.now().year)
+
+                    # 1. 파일 첨부 먼저
+                    if has_file_item:
                         try:
-                            file_result = await _extract_bill_attachments(
+                            file_result = await _extract_policy_attachments(
                                 page, p.view_class, base_url, req, outbbs_cn, year, items=req.item)
                         except Exception as e:
                             print(f"    [!] 첨부파일 수집 실패: {str(e)[:100]}", flush=True)
                             file_result = {}
                             try:
-                                await page.goto(target_url, wait_until="domcontentloaded",
-                                                timeout=int(p.timeout))
+                                await page.goto(target_url, wait_until="domcontentloaded", timeout=int(p.timeout))
                             except Exception: pass
- 
                         detail.update({
-                            "ORG_FILE_NM": file_result.get("BI_FILE_NM",  ""),
-                            "DOWNPATH":    file_result.get("BI_FILE_PATH", ""),
-                            "DOWNID":      file_result.get("BI_FILE_ID",   ""),
-                            "DOWNURL":     file_result.get("BI_FILE_URL",  ""),
+                            "ORG_FILE_NM": file_result.get("ORG_FILE_NM", ""),
+                            "DOWNPATH":    file_result.get("DOWNPATH",    ""),
+                            "DOWNID":      file_result.get("DOWNID",      ""),
+                            "DOWNURL":     file_result.get("DOWNURL",     ""),
                         })
+
+                    # 2. 이미지 수집 후 파일 배열에 합산
+                    img_urls = re.findall(r'<img[^>]+src="([^"]+)"', detail_html, re.IGNORECASE)
+                    img_urls = [u for u in img_urls if not any(k in u for k in [
+                        "/resource/", "/koglOpen/", "btn_preview", "pdf.png",
+                        "synap", "opentype", "/images/common/", "/images/sub/",
+                        "/images/board/", "ico_pdf", "ico_jpg", "ico_hwp", "ico_", "/tiny/"])]
+                    if img_urls:
+                        img_results = []
+                        for img_seq, img_url in enumerate(img_urls, start=1):
+                            full_img_url = urljoin(base_url, img_url)
+                            img_param = dict(parse_qsl(urlparse(full_img_url).query)).get("img", "")
+                            _, ext = os.path.splitext(img_param or urlparse(full_img_url).path)
+                            if not ext: ext = ".png"
+                            img_path = build_policy_save_path(req, year, outbbs_cn, img_seq, ext).replace("_attach_", "_img_")
+                            try:
+                                async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT},
+                                                            timeout=httpx.Timeout(30.0), verify=certifi.where()) as client:
+                                    r = await client.get(full_img_url); r.raise_for_status()
+                                with open(img_path, "wb") as f: f.write(r.content)
+                                img_results.append({"url": full_img_url, "path": img_path.replace("\\", "/")})
+                                print(f"[+] [POLICY] 이미지 저장: {img_path}", flush=True)
+                            except Exception as e:
+                                print(f"[-] [POLICY] 이미지 실패 ({full_img_url}): {e}", flush=True)
+
+                        if img_results:
+                            def to_list(v):
+                                if not v: return []
+                                try:
+                                    parsed = json.loads(v)
+                                    return parsed if isinstance(parsed, list) else [str(parsed)]
+                                except: return [v] if v else []
+
+                            nms   = to_list(detail.get("ORG_FILE_NM", "") or "")
+                            paths = to_list(detail.get("DOWNPATH",    "") or "")
+                            ids   = to_list(detail.get("DOWNID",      "") or "")
+                            urls  = to_list(detail.get("DOWNURL",     "") or "")
+
+                            for img in img_results:
+                                nms.append(os.path.basename(img["path"]))
+                                paths.append(img["path"])
+                                ids.append(str(len(ids) + 1))
+                                urls.append(img["url"])
+
+                            def one_or_json(lst):
+                                return lst[0] if len(lst) == 1 else json.dumps(lst, ensure_ascii=False)
+
+                            detail["ORG_FILE_NM"] = one_or_json(nms)
+                            detail["DOWNPATH"]    = one_or_json(paths)
+                            detail["DOWNID"]      = one_or_json(ids)
+                            detail["DOWNURL"]     = one_or_json(urls)
+                            detail.pop("IMAGEPATH", None)
  
                     collected_item = {
                         "view_id":   vid,
                         "URL":       target_url,
-                        "OUTBBS_CN": outbbs_cn,   # BI_CN 대신 OUTBBS_CN
+                        "SEEDURL":   p.list_url,
+                        "OUTBBS_CN": outbbs_cn,
                         **detail,
                     }
  
-                    field_logs.append(
-                        audit_fields(vid, target_url, outbbs_cn, collected_item, req.item))
+                    field_logs.append(audit_fields(vid, target_url, outbbs_cn, collected_item, req.item))
  
                     if last_sig and not detail_last_data_reached \
                             and is_last_data_match(collected_item, last_sig):
@@ -1605,17 +1934,17 @@ async def execute_policy_scraping(req: PolicyRequest):
  
     await _do_send(INSERT_API_URL, full_payload)
     return {
-        "req_id":             req.req_id,  "type":    req.type,
-        "crw_id":             req.crw_id,  "file_dir": req.file_dir,
-        "ok":                 True,        "interrupted": is_interrupted,
-        "last_data_reached":  last_data_reached or detail_last_data_reached,
-        "data_count":         len(view_data), "saved_file": filepath,
+        "req_id":            req.req_id,  "type":     req.type,
+        "crw_id":            req.crw_id,  "file_dir": req.file_dir,
+        "ok":                True,        "interrupted": is_interrupted,
+        "last_data_reached": last_data_reached or detail_last_data_reached,
+        "data_count":        len(view_data), "saved_file": filepath,
     }
  
  
 async def execute_policy_scraping_test(req: PolicyRequest):
     p = req.param
-    view_data = []
+    view_data     = []
     has_file_item = any(i.col in _POLICY_FILE_COLS for i in req.item)
  
     async with async_playwright() as playwright:
@@ -1623,55 +1952,142 @@ async def execute_policy_scraping_test(req: PolicyRequest):
         try:
             print(f"[POLICY TEST] 리스트: {p.list_url}", flush=True)
             await page.goto(p.list_url, wait_until="domcontentloaded", timeout=int(p.timeout))
-            await page.wait_for_selector(normalize_selector(p.list_class), timeout=3000)
+            await page.wait_for_selector(normalize_selector(p.list_class), timeout=int(p.timeout))
  
-            list_data = await BillListCrawler.extract_list_page(
-                page, p.list_class, p.view_id_param)
+            list_data = await BillListCrawler.extract_list_page(page, p.list_class, p.view_id_param)
             if not list_data:
                 return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id,
                         "file_dir": req.file_dir, "data": []}
  
             item = list_data[0]
             vid  = item.get("view_id")
-            if vid:
-                href = item.get("link_href", "")
-                is_real = href and not href.startswith(("#", "javascript"))
-                target_url = (
-                    urljoin(p.list_url, href) if is_real
-                    else f"{p.view_url}{'&' if '?' in (p.view_url or '') else '?'}{p.view_id_param}={vid}"
-                )
-                print(f"[POLICY TEST] 상세: {vid}", flush=True)
-                try:
-                    detail_html = await _extract_bill_detail_html(
-                        page, p.view_class, target_url, timeout=int(p.timeout))
-                    outbbs_cn = f"CLIKC{str(time.time_ns())[:16]}"
-                    detail = parse_policy_detail(
-                        detail_html, req.item, list_title=item.get("BI_SJ", ""))
+            if not vid:
+                return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id,
+                        "file_dir": req.file_dir, "data": []}
  
-                    parsed_u = urlparse(target_url)
-                    base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
-                    if has_file_item and not detail.get("DOWNPATH"):
-                        year = (detail.get("CDATE") or "")[:4] or str(datetime.now().year)
+            href     = item.get("link_href", "")
+            is_real  = href and not href.startswith(("#", "javascript"))
+            target_url = (
+                urljoin(p.list_url, href) if is_real
+                else f"{p.view_url}{'&' if '?' in (p.view_url or '') else '?'}{p.view_id_param}={vid}"
+            )
+            print(f"[POLICY TEST] 상세: {vid}", flush=True)
+ 
+            try:
+                detail_html = await _extract_bill_detail_html(
+                    page, p.view_class, target_url, timeout=int(p.timeout))
+                parsed_u  = urlparse(target_url)
+                base_url  = f"{parsed_u.scheme}://{parsed_u.netloc}"
+                outbbs_cn = f"CLIKC{str(time.time_ns())[:16]}"
+                list_title = item.get("BI_SJ", "")
+                detail    = parse_policy_detail(detail_html, req.item, list_title=list_title)
+                year      = str(datetime.now().year)
+ 
+                # ── DOWNURL JS 변환 ──────────────────────────────────
+                raw_down = detail.get("DOWNURL", "")
+                if raw_down and re.fullmatch(r'\d+', raw_down.strip()):
+                    full_page_html = await page.content()
+                    url_m = re.search(r'["\']([^"\']*pAtFileSn[^"\']*)["\']',
+                                    full_page_html, re.IGNORECASE)
+                    if url_m:
+                        resolved_url = re.sub(r'pAtFileSn=[^&"\']+',
+                                            f'pAtFileSn={raw_down.strip()}', url_m.group(1))
+                        resolved_url = re.sub(r'pRptNo=[^&"\']+', f'pRptNo={vid}', resolved_url)
+                        detail["DOWNURL"] = urljoin(base_url, resolved_url)
+                elif raw_down and re.fullmatch(r'\d+', raw_down.strip()):
+                    full_page_html = await page.content()
+                    url_m = re.search(r'["\']([^"\']*pAtFileSn[^"\']*)["\']',
+                                      full_page_html, re.IGNORECASE)
+                    if url_m:
+                        resolved_url = re.sub(r'pAtFileSn=[^&"\']+',
+                                              f'pAtFileSn={raw_down.strip()}', url_m.group(1))
+                        resolved_url = re.sub(r'pRptNo=[^&"\']+', f'pRptNo={vid}', resolved_url)
+                        detail["DOWNURL"] = urljoin(base_url, resolved_url)
+                # ────────────────────────────────────────────────────
+ 
+                # 1. 파일 첨부
+                if has_file_item:
+                    try:
+                        file_result = await _extract_policy_attachments(
+                            page, p.view_class, base_url, req, outbbs_cn, year, items=req.item)
+                    except Exception as e:
+                        print(f"    [!] 첨부파일 실패: {str(e)[:100]}", flush=True)
+                        file_result = {}
                         try:
-                            file_result = await _extract_bill_attachments(
-                                page, p.view_class, base_url, req, outbbs_cn, year, items=req.item)
-                        except Exception as e:
-                            print(f"    [!] 첨부파일 실패: {str(e)[:100]}", flush=True)
-                            file_result = {}
-                        mapped = _remap_policy_file_keys(file_result)
-                        detail.update({
-                            "ORG_FILE_NM": mapped.get("ORG_FILE_NM", ""),
-                            "DOWNPATH":    mapped.get("DOWNPATH",    ""),
-                            "DOWNID":      mapped.get("DOWNID",      ""),
-                            "DOWN_URL":    mapped.get("DOWN_URL",    ""),
-                        })
- 
-                    view_data.append({
-                        "view_id": vid, "URL": target_url,
-                        "OUTBBS_CN": outbbs_cn, **detail,
+                            await page.goto(target_url, wait_until="domcontentloaded",
+                                            timeout=int(p.timeout))
+                        except Exception: pass
+                    detail.update({
+                        "ORG_FILE_NM": file_result.get("ORG_FILE_NM", ""),
+                        "DOWNPATH":    file_result.get("DOWNPATH",    ""),
+                        "DOWNID":      file_result.get("DOWNID",      ""),
+                        "DOWNURL":     file_result.get("DOWNURL",     ""),
                     })
-                except Exception as e:
-                    view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
+ 
+                # 2. 이미지 수집 후 파일 배열에 합산
+                img_urls = re.findall(r'<img[^>]+src="([^"]+)"', detail_html, re.IGNORECASE)
+                img_urls = [u for u in img_urls if not any(k in u for k in [
+                    "/resource/", "/koglOpen/", "btn_preview", "pdf.png",
+                    "synap", "opentype", "/images/common/", "/images/sub/"])]
+                if img_urls:
+                    img_results = []
+                    for img_seq, img_url in enumerate(img_urls, start=1):
+                        full_img_url = urljoin(base_url, img_url)
+                        img_param = dict(parse_qsl(urlparse(full_img_url).query)).get("img", "")
+                        _, ext = os.path.splitext(img_param or urlparse(full_img_url).path)
+                        if not ext: ext = ".png"
+                        img_path = build_policy_save_path(
+                            req, year, outbbs_cn, img_seq, ext).replace("_attach_", "_img_")
+                        try:
+                            async with httpx.AsyncClient(
+                                    headers={"User-Agent": USER_AGENT},
+                                    timeout=httpx.Timeout(30.0), verify=certifi.where()) as client:
+                                r = await client.get(full_img_url); r.raise_for_status()
+                            with open(img_path, "wb") as f: f.write(r.content)
+                            img_results.append({"url": full_img_url,
+                                                "path": img_path.replace("\\", "/")})
+                            print(f"[+] [POLICY TEST] 이미지 저장: {img_path}", flush=True)
+                        except Exception as e:
+                            print(f"[-] [POLICY TEST] 이미지 실패 ({full_img_url}): {e}", flush=True)
+ 
+                    if img_results:
+                        def to_list(v):
+                            if not v: return []
+                            try:
+                                parsed = json.loads(v)
+                                return parsed if isinstance(parsed, list) else [str(parsed)]
+                            except: return [v] if v else []
+ 
+                        nms   = to_list(detail.get("ORG_FILE_NM", "") or "")
+                        paths = to_list(detail.get("DOWNPATH",    "") or "")
+                        ids   = to_list(detail.get("DOWNID",      "") or "")
+                        urls  = to_list(detail.get("DOWNURL",     "") or "")
+ 
+                        for img in img_results:
+                            nms.append(os.path.basename(img["path"]))
+                            paths.append(img["path"])
+                            ids.append(str(len(ids) + 1))
+                            urls.append(img["url"])
+ 
+                        def one_or_json(lst):
+                            return lst[0] if len(lst) == 1 else json.dumps(lst, ensure_ascii=False)
+ 
+                        detail["ORG_FILE_NM"] = one_or_json(nms)
+                        detail["DOWNPATH"]    = one_or_json(paths)
+                        detail["DOWNID"]      = one_or_json(ids)
+                        detail["DOWNURL"]     = one_or_json(urls)
+                        detail.pop("IMAGEPATH", None)
+ 
+                view_data.append({
+                    "view_id":   vid,
+                    "URL":       target_url,
+                    "SEEDURL":   p.list_url,
+                    "OUTBBS_CN": outbbs_cn,
+                    **detail,
+                })
+            except Exception as e:
+                view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
+ 
         except Exception as e:
             print(f"[POLICY TEST] 에러: {e}", flush=True)
         finally:
