@@ -29,6 +29,7 @@ _MAX_CONSECUTIVE_FAIL = 5
 _DATE_PATTERN         = re.compile(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})')
 _FILE_SKIP_COLS = {"BI_FILE_NM", "BI_FILE_URL", "BI_FILE_PATH", "BI_FILE_ID"}
 _LAST_DATA_MATCH_KEYS = ["URL", "BI_SJ", "BI_CN", "BI_NO"]
+_POLICY_FILE_COLS = {"ORG_FILE_NM", "DOWNPATH", "DOWNID", "DOWN_URL"}
 
 # ── BI_NO / RASMBLY_NUMPR_SESN 파서 ──────────────────────────────
 _P_BI_NO_SESN        = re.compile(r'^(.+?)\s*[\(\（]제\s*(\d+)\s*회[\)\）]')
@@ -83,10 +84,29 @@ class LamanParam(BaseModel):
     list_url:           str            = Field(...)
     list_class:         str            = Field("div.profile_wrap")
     profile_selector:   str            = Field("a.btn_profile")
-    view_url:           Optional[str]  = None
-    view_class:         Optional[str]  = None
+    detail_url_pattern: Optional[str]  = None
+    rasmbly_numpr:      str            = Field("")
+    rasmbly_id:         str            = Field("")
+    photo_download:     str            = Field("Y")
     ssl_mode:           str            = Field("Y")
-    timeout:            str            = Field("20000")
+    timeout:       str            = Field("20000")
+
+class PolicyParam(BaseModel):
+    list_url:              str           = Field(...)
+    view_url:              Optional[str] = None
+    view_id_param:         str           = Field("uuid")
+    list_class:            str           = Field("table.board_list")
+    view_class:            Optional[str] = None
+    max_pages:             str           = Field("")
+    paging_selector:       str           = Field("div#pagingNav")
+    next_btn_selector:     str           = Field("a.num_right")
+    end_btn_selector:      str           = Field("a.num_last")
+    timeout:          str           = Field("20000")
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def default_timeout(cls, v):
+        if v is None or str(v).strip() == "": return "20000"
+        return str(v)
 
 class LastData(BaseModel):
     model_config = {"extra": "allow"}
@@ -150,6 +170,15 @@ class MinutesItem(BaseModel):
     raw_href:              Optional[str] = None
     raw_onclick:           Optional[str] = None
     note:                  Optional[str] = None
+
+class PolicyRequest(BaseModel):
+    req_id:    str             = Field(..., min_length=1)
+    type:      str             = Field(..., min_length=1)
+    crw_id:    str             = Field(..., min_length=1)
+    file_dir:  str             = Field(...)
+    param:     PolicyParam     = Field(...)
+    item:      List[RegexItem] = Field(default_factory=list)
+    last_data: Optional[LastData] = None
 
 # ── 공통 유틸 ─────────────────────────────────────────────────────
 def error_response(msg):
@@ -779,7 +808,13 @@ class BillListCrawler:
         except Exception as e: print(f"[!] 페이지 이동 실패: {e}",flush=True)
         return False
 
-async def _collect_pages(page,list_url,numpr,list_class,vid_param,max_pages,paging_sel,next_btn_sel,end_btn_sel,stop_check,search_form_selector,numpr_select_selector,search_btn_selector,last_sig=None,timeout=30000):
+# 수정
+async def _collect_pages(page, list_url, numpr="", list_class="", vid_param="", 
+                         max_pages="", paging_sel="", next_btn_sel="", end_btn_sel="",
+                         stop_check=None, search_form_selector="", numpr_select_selector="",
+                         search_btn_selector="", last_sig=None, timeout=30000):
+    if stop_check is None: stop_check = lambda: False
+
     collect_errors,last_data_reached,consecutive_fail=[],False,0
     await page.goto(list_url,wait_until="domcontentloaded",timeout=int(timeout))
     if numpr and numpr.strip():
@@ -1200,7 +1235,7 @@ async def execute_minutes_scraping(request: MinutesRequest):
     return {"req_id":request.req_id,"type":request.type,"crw_id":request.crw_id,"ok":True,"data_count":len(data),"saved_file":filepath}
 
 # ── laman 의원정보 수집 엔진 ──────────────────────────────────────
-async def _download_photo(photo_url: str, base_url: str, req: LamanRequest) -> tuple:
+async def _download_photo(photo_url: str, base_url: str, req: LamanRequest, asemby_id: str) -> tuple:
     full_url = urljoin(base_url, photo_url)
     try:
         async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT},
@@ -1210,10 +1245,12 @@ async def _download_photo(photo_url: str, base_url: str, req: LamanRequest) -> t
             r = await client.get(full_url); r.raise_for_status()
         _, ext = os.path.splitext(urlparse(full_url).path)
         if not ext: ext = ".jpg"
-        save_dir = os.path.join("/", req.file_dir, "assemblyinfo", req.crw_id)  # ← 수정
+        rasmbly_id = req.param.rasmbly_id or "000000"
+        numpr      = req.param.rasmbly_numpr or "0"
+        save_dir   = os.path.join("/", req.file_dir, "assemblyinfo", rasmbly_id, numpr)
         os.makedirs(save_dir, exist_ok=True)
-        file_nm  = f"{req.crw_id}{ext}"
-        save_path = os.path.join(save_dir, file_nm)
+        file_nm    = f"{asemby_id}{ext}"
+        save_path  = os.path.join(save_dir, file_nm)
         if not os.path.exists(save_path):
             with open(save_path, "wb") as f: f.write(r.content)
         return save_path.replace("\\", "/"), file_nm
@@ -1222,11 +1259,10 @@ async def _download_photo(photo_url: str, base_url: str, req: LamanRequest) -> t
         return "", ""
 
 async def _get_profile_detail_html(page, uid: str, base_url: str,
-                                    view_url: Optional[str],
-                                    view_class: Optional[str],
-                                    timeout: int) -> str:
-    if view_url:
-        detail_url = urljoin(base_url, view_url.replace("{uid}", uid))
+                                    detail_url_pattern: Optional[str], timeout: int) -> str:
+    # detail_url_pattern 있으면 직접 URL 접근
+    if detail_url_pattern:
+        detail_url = urljoin(base_url, detail_url_pattern.replace("{uid}", uid))
         try:
             await page.goto(detail_url, wait_until="domcontentloaded", timeout=timeout)
             return await page.content()
@@ -1234,41 +1270,51 @@ async def _get_profile_detail_html(page, uid: str, base_url: str,
             print(f"[-] 상세 URL 접근 실패 ({detail_url}): {e}", flush=True)
             return ""
 
-    # ── 이전 모달 닫기: on 클래스 제거로 즉시 처리 ──────────────
-    if view_class:
-        try:
-            await page.evaluate(f"""
-                const el = document.querySelector('{view_class}');
-                if (el) el.classList.remove('on');
-            """)
-        except Exception: pass
+    btn = page.locator(f"[data-uid='{uid}']").first
+    if await btn.count() == 0:
+        print(f"[-] btn_profile not found (uid={uid})", flush=True)
+        return ""
 
-    # ── 클릭 → 팝업 대기 ─────────────────────────────────────────
-    await page.evaluate(f"document.querySelector('[data-uid=\"{uid}\"]')?.click()")
+    # 모달/레이어 방식
+    try:
+        # 이전 모달이 열려있으면 먼저 닫기
+        close_sels = ["button.close", "a.close", ".btn_close", ".pop_close",
+                      "[class*='close']", "div.mask"]
+        for csel in close_sels:
+            try:
+                el = await page.query_selector(csel)
+                if el and await el.is_visible():
+                    await el.click()
+                    await page.wait_for_timeout(300)
+                    break
+            except Exception:
+                continue
 
-    if view_class:
-        try:
-            await page.wait_for_selector(view_class, timeout=2000, state="visible")
-            el = await page.query_selector(view_class)
-            if el and await el.is_visible():
-                print(f"[+] view_class 방식 성공 (uid={uid}, sel={view_class})", flush=True)
-                return await el.inner_html()
-        except Exception as e:
-            print(f"[!] view_class 실패, fallback (uid={uid}): {e}", flush=True)
+        # JS로 직접 클릭 (마스크 레이어 우회)
+        await page.evaluate(f"document.querySelector('[data-uid=\"{uid}\"]')?.click()")
+        await page.wait_for_timeout(500)
 
-    # ── fallback: 기존 순회 ───────────────────────────────────────
-    for sel in ["div#profile_layer_popup", "div.pop_profile", "div.info", "div.profile_detail",
-                "div.member_info", "div.popup", "div.layer", "div#layerPop", "div.modal"]:
-        try:
-            await page.wait_for_selector(sel, timeout=2000, state="visible")
-            el = await page.query_selector(sel)
-            if el and await el.is_visible():
-                print(f"[+] 모달 방식 성공 (uid={uid}, sel={sel})", flush=True)
-                return await el.inner_html()
-        except Exception: continue
+        # 모달 셀렉터 순서대로 탐색
+        modal_sels = ["div#profile_layer_popup", "div.pop_profile",
+                      "div.info", "div.profile_detail", "div.member_info",
+                      "div.popup", "div.layer", "div#layerPop", "div.modal"]
+        for sel in modal_sels:
+            try:
+                await page.wait_for_selector(sel, timeout=2000, state="visible")
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    html = await el.inner_html()
+                    print(f"[+] 모달 방식 성공 (uid={uid}, sel={sel})", flush=True)
+                    return html
+            except Exception:
+                continue
 
-    print(f"[+] 페이지 전체 반환 (uid={uid})", flush=True)
-    return await page.content()
+        await page.wait_for_timeout(500)
+        print(f"[+] 페이지 전체 반환 (uid={uid})", flush=True)
+        return await page.content()
+    except Exception as e:
+        print(f"[-] 모달 방식 실패 (uid={uid}): {e}", flush=True)
+        return ""
 
 async def execute_laman_scraping(req: LamanRequest):
     app.state.stop_scraping = False
@@ -1323,9 +1369,10 @@ async def execute_laman_scraping(req: LamanRequest):
                 uid  = m["uid"]
                 name = m["name"]
                 print(f"[LAMAN] ({idx+1}/{len(members)}) {name} (uid={uid})", flush=True)
+                asemby_id = f"{p.rasmbly_id}_{uid}" if p.rasmbly_id else uid
 
                 detail_html = await _get_profile_detail_html(
-                    page, uid, base_url, p.view_url, p.view_class, timeout)
+                    page, uid, base_url, p.detail_url_pattern, timeout)
 
                 # item[] regex 파싱
                 parsed = parse_detail_by_items(detail_html, req.item) if detail_html else {}
@@ -1337,17 +1384,21 @@ async def execute_laman_scraping(req: LamanRequest):
                 # 사진 다운로드
                 photo_url  = parsed.get("PHOTO_FILE_URL") or m["photo_url"]
                 photo_nm   = parsed.get("PHOTO_FILE_NM")  or m["photo_alt"] or name
-                photo_path, dl_nm = await _download_photo(photo_url, base_url, req)
-                if dl_nm: photo_nm = dl_nm
+                photo_path = ""
+                if p.photo_download == "Y" and photo_url:
+                    photo_path, dl_nm = await _download_photo(photo_url, base_url, req, asemby_id)
+                    if dl_nm: photo_nm = dl_nm
 
                 parsed.update({
-                    "RASMBLY_ID":      req.crw_id,
+                    "ASEMBY_ID":       asemby_id,
+                    "RASMBLY_ID":      p.rasmbly_id,
+                    "RASMBLY_NUMPR":   p.rasmbly_numpr,
                     "PHOTO_FILE_URL":  urljoin(base_url, photo_url) if photo_url else "",
                     "PHOTO_FILE_NM":   photo_nm,
                     "PHOTO_FILE_PATH": photo_path,
                     "CUD_CODE":        "C",
                     "ISVIEW":          "Y",
-                    "ASEMBY_CN":       parsed.get("ASEMBY_CN") or "",
+                    "ASEMBY_CN":       parsed.get("ASEMBY_CN") or p.rasmbly_numpr,
                     "FRST_REGIST_DT":  datetime.now().strftime("%Y%m%d%H%M%S"),
                 })
                 data.append(parsed)
@@ -1368,6 +1419,268 @@ async def execute_laman_scraping(req: LamanRequest):
     return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id,
             "ok": True, "interrupted": is_interrupted, "data_count": len(data), "saved_file": filepath}
 
+# ── policy 전용 파싱 ──────────────────────────────────────────────
+def parse_policy_detail(detail_html: str, items, list_title: str = None) -> dict:
+    result = {}
+    for item in items:
+        key = normalize_text(item.col)
+        if not key: continue
+        if key in _POLICY_FILE_COLS: continue
+
+        if item.value is not None and normalize_text(item.value):
+            result[key] = normalize_text(item.value); continue
+        if item.regex and len(item.regex) == 1 and normalize_text(item.regex[0]).lower() == "list_title":
+            result[key] = normalize_text(list_title) or ""; continue
+        if not item.regex: continue
+
+        raw_value = None
+        for pattern in item.regex:
+            raw_value = apply_regex_raw(detail_html, pattern)
+            if raw_value is not None: break
+
+        if key == "CDATE":
+            result[key] = normalize_date_to_yyyymmdd(raw_value) or normalize_text(raw_value) or ""
+        else:
+            value = strip_html_tags(raw_value) if item.removeTags == "Y" else normalize_text(raw_value)
+            result[key] = value if value is not None else ""
+    return result
+ 
+ 
+def _remap_policy_file_keys(file_result: dict) -> dict:
+    """_extract_bill_attachments 결과의 BI_FILE_* 키를 policy 컬럼명으로 변환"""
+    return {_POLICY_FILE_COLS.get(k, k): v for k, v in file_result.items()}
+ 
+ 
+# ── policy 실행 엔진 ──────────────────────────────────────────────
+async def execute_policy_scraping(req: PolicyRequest):
+    app.state.stop_scraping = False
+    p = req.param
+    list_data, view_data, error_logs, field_logs = [], [], [], []
+    filepath = None
+    last_sig = _build_last_data_signature(req.last_data) if req.last_data else None
+    if last_sig:
+        print(f"[POLICY] 추가수집 모드: {last_sig}", flush=True)
+ 
+    has_file_item = any(
+        i.col in _POLICY_FILE_COLS for i in req.item
+    )
+ 
+    async with async_playwright() as playwright:
+        # ── 1단계: 리스트 수집 ────────────────────────────────────
+        print(f"\n{'='*60}\n[POLICY] [1단계] 리스트: {p.list_url}", flush=True)
+        browser, page = await _setup_browser(playwright)
+        try:
+            list_data, collect_errors, last_data_reached = await _collect_pages(
+                page, p.list_url,
+                list_class     = p.list_class,
+                vid_param      = p.view_id_param,
+                max_pages      = p.max_pages,
+                paging_sel     = p.paging_selector,
+                next_btn_sel   = p.next_btn_selector,
+                end_btn_sel    = p.end_btn_selector,
+                stop_check     = lambda: app.state.stop_scraping,
+                numpr          = "",     # 미사용
+                search_form_selector  = "",     # 미사용
+                numpr_select_selector = "",     # 미사용
+                search_btn_selector   = "",     # 미사용
+                last_sig       = last_sig,
+                timeout        = int(p.timeout),
+            )
+        finally:
+            await browser.close()
+            print("[POLICY] 1단계 브라우저 종료", flush=True)
+ 
+        error_logs.extend(collect_errors)
+        if not list_data:
+            error_logs.append({"step": "1단계_리스트수집", "url": p.list_url,
+                                "selector": p.list_class, "error": "리스트 수집 결과 0건"})
+ 
+        total = len(list_data)
+        print(f"\n[POLICY] [2단계] 상세 수집 ({total}건)\n{'-'*60}", flush=True)
+        detail_last_data_reached = False
+ 
+        # ── 2단계: 상세 수집 ──────────────────────────────────────
+        browser, page = await _setup_browser(playwright)
+        try:
+            for idx, list_item in enumerate(list_data):
+                if app.state.stop_scraping:
+                    print(f"[POLICY] 중단 요청: {idx}번째", flush=True); break
+ 
+                vid = list_item.get("view_id")
+                if not vid: continue
+ 
+                print(f"[POLICY] 상세 ({idx+1}/{total}) ID: {vid}", flush=True)
+                href = list_item.get("link_href", "")
+                is_real = href and not href.startswith(("#", "javascript"))
+                target_url = (
+                    urljoin(p.list_url, href) if is_real
+                    else f"{p.view_url}{'&' if '?' in (p.view_url or '') else '?'}{p.view_id_param}={vid}"
+                )
+ 
+                try:
+                    detail_html = await _extract_bill_detail_html(
+                        page, p.view_class, target_url, timeout=int(p.timeout))
+                    parsed_u = urlparse(target_url)
+                    base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
+ 
+                    outbbs_cn = f"CLIKC{str(time.time_ns())[:16]}"
+                    list_title = list_item.get("BI_SJ", "")
+ 
+                    # policy 전용 파싱 (CONTENT 원문, CDATE 포맷)
+                    detail = parse_policy_detail(detail_html, req.item, list_title=list_title)
+ 
+                    # 파일 첨부 수집 (bill 함수 재사용 → 키 변환)
+                    if has_file_item and not detail.get("DOWNPATH"):
+                        year = (detail.get("CDATE") or "")[:4] or str(datetime.now().year)
+                        try:
+                            file_result = await _extract_bill_attachments(
+                                page, p.view_class, base_url, req, outbbs_cn, year, items=req.item)
+                        except Exception as e:
+                            print(f"    [!] 첨부파일 수집 실패: {str(e)[:100]}", flush=True)
+                            file_result = {}
+                            try:
+                                await page.goto(target_url, wait_until="domcontentloaded",
+                                                timeout=int(p.timeout))
+                            except Exception: pass
+ 
+                        detail.update({
+                            "ORG_FILE_NM": file_result.get("BI_FILE_NM",  ""),
+                            "DOWNPATH":    file_result.get("BI_FILE_PATH", ""),
+                            "DOWNID":      file_result.get("BI_FILE_ID",   ""),
+                            "DOWNURL":     file_result.get("BI_FILE_URL",  ""),
+                        })
+ 
+                    collected_item = {
+                        "view_id":   vid,
+                        "URL":       target_url,
+                        "OUTBBS_CN": outbbs_cn,   # BI_CN 대신 OUTBBS_CN
+                        **detail,
+                    }
+ 
+                    field_logs.append(
+                        audit_fields(vid, target_url, outbbs_cn, collected_item, req.item))
+ 
+                    if last_sig and not detail_last_data_reached \
+                            and is_last_data_match(collected_item, last_sig):
+                        detail_last_data_reached = True
+                        print("[POLICY] 상세 기준점 도달", flush=True); break
+ 
+                    view_data.append(collected_item)
+ 
+                except Exception as e:
+                    print(f"    [!] ID: {vid} 실패: {e}", flush=True)
+                    view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
+                    error_logs.append({"step": "2단계_상세수집", "view_id": vid,
+                                       "url": target_url, "error": str(e)})
+ 
+        except Exception as e:
+            print(f"\n[POLICY] 상세 수집 전체 에러: {e}", flush=True)
+            return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id,
+                    "file_dir": req.file_dir, "ok": False, "error_msg": str(e)}
+        finally:
+            await browser.close()
+ 
+    is_interrupted = app.state.stop_scraping or last_data_reached or detail_last_data_reached
+    result_block = _build_result(view_data, error_logs, is_interrupted)
+    if (last_data_reached or detail_last_data_reached) and result_block["status"] in ("SUCCESS", "PARTIAL"):
+        result_block["message"] = "추가수집 완료 (last_data 기준점 도달)"
+ 
+    if field_logs:
+        save_field_logs(field_logs, req)
+ 
+    view_data.reverse()
+    full_payload = {
+        "reqId":   req.req_id, "type": req.type, "crwId": req.crw_id,
+        "fileDir": req.file_dir, "result": result_block,
+        "data":    view_data,   "log":   error_logs,
+    }
+ 
+    domain = extract_domain(p.list_url)
+    if view_data:
+        filepath = save_to_json(full_payload, domain, req.type)
+        print(f"[POLICY] 저장 완료 ({len(view_data)}건): {filepath}", flush=True)
+    else:
+        filepath = save_to_json(full_payload, domain, req.type + "_error")
+        print(f"[POLICY] 에러 로그 {len(error_logs)}건: {filepath}", flush=True)
+ 
+    await _do_send(INSERT_API_URL, full_payload)
+    return {
+        "req_id":             req.req_id,  "type":    req.type,
+        "crw_id":             req.crw_id,  "file_dir": req.file_dir,
+        "ok":                 True,        "interrupted": is_interrupted,
+        "last_data_reached":  last_data_reached or detail_last_data_reached,
+        "data_count":         len(view_data), "saved_file": filepath,
+    }
+ 
+ 
+async def execute_policy_scraping_test(req: PolicyRequest):
+    p = req.param
+    view_data = []
+    has_file_item = any(i.col in _POLICY_FILE_COLS for i in req.item)
+ 
+    async with async_playwright() as playwright:
+        browser, page = await _setup_browser(playwright)
+        try:
+            print(f"[POLICY TEST] 리스트: {p.list_url}", flush=True)
+            await page.goto(p.list_url, wait_until="domcontentloaded", timeout=int(p.timeout))
+            await page.wait_for_selector(normalize_selector(p.list_class), timeout=3000)
+ 
+            list_data = await BillListCrawler.extract_list_page(
+                page, p.list_class, p.view_id_param)
+            if not list_data:
+                return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id,
+                        "file_dir": req.file_dir, "data": []}
+ 
+            item = list_data[0]
+            vid  = item.get("view_id")
+            if vid:
+                href = item.get("link_href", "")
+                is_real = href and not href.startswith(("#", "javascript"))
+                target_url = (
+                    urljoin(p.list_url, href) if is_real
+                    else f"{p.view_url}{'&' if '?' in (p.view_url or '') else '?'}{p.view_id_param}={vid}"
+                )
+                print(f"[POLICY TEST] 상세: {vid}", flush=True)
+                try:
+                    detail_html = await _extract_bill_detail_html(
+                        page, p.view_class, target_url, timeout=int(p.timeout))
+                    outbbs_cn = f"CLIKC{str(time.time_ns())[:16]}"
+                    detail = parse_policy_detail(
+                        detail_html, req.item, list_title=item.get("BI_SJ", ""))
+ 
+                    parsed_u = urlparse(target_url)
+                    base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
+                    if has_file_item and not detail.get("DOWNPATH"):
+                        year = (detail.get("CDATE") or "")[:4] or str(datetime.now().year)
+                        try:
+                            file_result = await _extract_bill_attachments(
+                                page, p.view_class, base_url, req, outbbs_cn, year, items=req.item)
+                        except Exception as e:
+                            print(f"    [!] 첨부파일 실패: {str(e)[:100]}", flush=True)
+                            file_result = {}
+                        mapped = _remap_policy_file_keys(file_result)
+                        detail.update({
+                            "ORG_FILE_NM": mapped.get("ORG_FILE_NM", ""),
+                            "DOWNPATH":    mapped.get("DOWNPATH",    ""),
+                            "DOWNID":      mapped.get("DOWNID",      ""),
+                            "DOWN_URL":    mapped.get("DOWN_URL",    ""),
+                        })
+ 
+                    view_data.append({
+                        "view_id": vid, "URL": target_url,
+                        "OUTBBS_CN": outbbs_cn, **detail,
+                    })
+                except Exception as e:
+                    view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
+        except Exception as e:
+            print(f"[POLICY TEST] 에러: {e}", flush=True)
+        finally:
+            await browser.close()
+ 
+    view_data.reverse()
+    return {"req_id": req.req_id, "type": req.type, "crw_id": req.crw_id,
+            "file_dir": req.file_dir, "data": view_data}
+
 # ── 공통 전송 ─────────────────────────────────────────────────────
 async def _do_send(target_url, payload):
     async with httpx.AsyncClient() as client:
@@ -1386,11 +1699,13 @@ def _route_request(raw: UnifiedRequest):
         return LamanRequest(req_id=raw.req_id, crw_id=raw.crw_id, type=raw.type,
                             file_dir=raw.file_dir, param=LamanParam(**raw.param),
                             item=raw.item, last_data=raw.last_data)
-    if raw.type == "bill":
-        return ScrapeRequest(req_id=raw.req_id, type=raw.type, crw_id=raw.crw_id, file_dir=raw.file_dir,
-                             param=ScrapeParam(**raw.param), item=raw.item,
-                             last_data=LastData(**raw.last_data) if raw.last_data else None)
-    raise ValueError(f"지원하지 않는 type: '{raw.type}' (bill / minutes / laman 중 하나여야 합니다)")
+    if raw.type in ("bill", "policy"):
+        param_cls = ScrapeParam if raw.type == "bill" else PolicyParam
+        req_cls   = ScrapeRequest if raw.type == "bill" else PolicyRequest
+        return req_cls(req_id=raw.req_id, type=raw.type, crw_id=raw.crw_id, file_dir=raw.file_dir,
+                       param=param_cls(**raw.param), item=raw.item,
+                       last_data=LastData(**raw.last_data) if raw.last_data else None)
+    raise ValueError(f"지원하지 않는 type: '{raw.type}' (bill / policy / laman 중 하나여야 합니다)")
 
 @app.post("/crawl", status_code=202)
 async def crawl(raw: UnifiedRequest, background_tasks: BackgroundTasks):
@@ -1398,6 +1713,7 @@ async def crawl(raw: UnifiedRequest, background_tasks: BackgroundTasks):
         req = _route_request(raw)
         if isinstance(req, MinutesRequest):   background_tasks.add_task(execute_minutes_scraping, req)
         elif isinstance(req, LamanRequest):   background_tasks.add_task(execute_laman_scraping,   req)
+        elif isinstance(req, PolicyRequest): background_tasks.add_task(execute_policy_scraping, req)
         else:                                 background_tasks.add_task(execute_bill_scraping,    req)
         return {"req_id":raw.req_id,"type":raw.type,"crw_id":raw.crw_id,"file_dir":raw.file_dir,"ok":True,"message":"수집 요청 완료"}
     except Exception as e: return error_response(f"요청 처리 중 오류: {e}")
@@ -1411,6 +1727,8 @@ async def crawl_test(raw: UnifiedRequest):
             return await execute_minutes_scraping(req)
         if isinstance(req, LamanRequest):
             return await execute_laman_scraping(req)
+        if isinstance(req, PolicyRequest):             # ← 추가
+            return await execute_policy_scraping_test(req)
         return await execute_bill_scraping_test(req)
     except Exception as e: return error_response(f"테스트 요청 오류: {e}")
 

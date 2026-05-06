@@ -21,6 +21,9 @@ from crawler import (
     execute_bill_scraping,
     execute_bill_scraping_test,
     execute_laman_scraping,
+    PolicyRequest,
+    execute_policy_scraping,
+    execute_policy_scraping_test,
 )
 
 from minutes import (
@@ -37,12 +40,6 @@ from five_mins_free_spch import (
     crawl_spch_regex_check,
     build_spch_callback_payload,
     run_spch_all_and_callback,
-)
-from policy import (
-    app as policy_app,
-    PolicyRequest,
-    execute_policy_scraping,
-    execute_policy_scraping_test as policy_test,
 )
 from crawl_status import create_job, get_job, set_job_running, set_job_done, set_job_failed
 
@@ -87,7 +84,7 @@ async def run_spch_job(req_obj):
     except Exception:
         await set_job_failed(req_obj.req_id)
 
-async def run_policy_job(req_obj):
+async def run_policy_job(req_obj):          # ← 추가
     try:
         await set_job_running(req_obj.req_id)
         await execute_policy_scraping(req_obj)
@@ -137,6 +134,12 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_laman_job, req_obj)
 
+        elif req_type == "policy":                  # ← if → elif, run_policy_job으로
+            raw = UnifiedRequest(**json_data)
+            req_obj = _route_request(raw)
+            await create_job(req_obj.req_id)
+            background_tasks.add_task(run_policy_job, req_obj)
+
         elif "minutes" in req_type:
             raw = CrawlRequest(**json_data)
             req_obj = parse_crawl_request(raw)
@@ -147,11 +150,6 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             req_obj = SpchCrawlRequest(**json_data)
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_spch_job, req_obj)
-
-        elif "policy" in req_type:
-            req_obj = PolicyRequest(**json_data)
-            await create_job(req_obj.req_id)
-            background_tasks.add_task(run_policy_job, req_obj)
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type: {req_type}"})
@@ -196,6 +194,11 @@ async def integrated_crawl_test_api(request: Request):
             raw = UnifiedRequest(**json_data)
             req_obj = _route_request(raw)
             return await execute_laman_scraping(req_obj)
+        
+        elif req_type == "policy":
+            raw = UnifiedRequest(**json_data)
+            req_obj = _route_request(raw)
+            return await execute_policy_scraping_test(req_obj)
 
         elif req_type == "minutes":
             raw = CrawlRequest(**json_data)
@@ -207,10 +210,6 @@ async def integrated_crawl_test_api(request: Request):
             req_obj = SpchCrawlRequest(**json_data)
             crawl_response = await crawl_spch_regex_check(req_obj, crawl_all=False)
             return build_spch_callback_payload(req_obj, crawl_response)
-
-        elif req_type == "policy":
-            req_obj = PolicyRequest(**json_data)
-            return await policy_test(req_obj)
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type: {req_type}"})
@@ -245,14 +244,8 @@ async def integrated_crawl_stop():
     # ── bill / laman 중단 (crawler.py 공유 state) ─────────────────
     if not crawler_app.state.stop_scraping:
         crawler_app.state.stop_scraping = True
-        stopped.append("bill/laman")
-        print("[!] [bill/laman] stop_scraping = True", flush=True)
-
-    # ── policy 중단 ───────────────────────────────────────────────
-    if getattr(policy_app.state, "current_stop_event", None):
-        policy_app.state.current_stop_event.set()
-        stopped.append("policy")
-        print("[!] [policy] stop_event.set()", flush=True)
+        stopped.append("bill/laman/policy")
+        print("[!] stop_scraping = True", flush=True)
 
     if stopped:
         return {"ok": True, "stopped": stopped, "message": f"{stopped} 중단 요청 완료. 현재 수집 건 완료 후 중단됩니다."}
