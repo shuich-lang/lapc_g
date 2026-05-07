@@ -1599,7 +1599,7 @@ async def run_minutes_all_and_callback(request: RegexCrawlRequest) -> None:
 
 
 # =========================
-# Main crawl services
+# Main crawl service
 # =========================
 
 async def crawl_minutes_regex_check(
@@ -1749,7 +1749,7 @@ async def crawl_minutes_regex_check(
 				continue
 
 			seen_keys.add(dedupe_key)
-
+			
 			# ── 필드 감사 로그 ──
 			if item.detail_access_success and item.fields:
 				field_logs.append(audit_fields_minutes(
@@ -1771,11 +1771,13 @@ async def crawl_minutes_regex_check(
 		)
 
 	if not all_items:
+		msg = "지정한 selector 기준으로 목록 item 또는 target을 찾지 못했습니다."
 		error_logs.append({
 			"step": "목록 수집 결과",
 			"url": str(request.param.list_url),
-			"error": "지정한 selector 기준으로 목록 item 또는 target을 찾지 못했습니다.",
+			"error": msg
 		})
+		raise ValueError(msg)
 	
 	if field_logs:
 		save_field_logs(field_logs, request)
