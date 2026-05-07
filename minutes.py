@@ -580,6 +580,8 @@ def _build_result(data_list: list, error_logs: list, error: str = "") -> dict:
 		status, code, message = "FAILED", "500", f"수집 실패: {error}"
 	elif data_count == 0 and has_timeout:
 		status, code, message = "TIMEOUT", "408", "타임아웃으로 수집 불가"
+	elif data_count == 0 and has_error:
+		status, code, message = "FAILED", "500", "수집 실패: " + error_logs[-1].get("error", "알 수 없는 오류")
 	elif data_count == 0:
 		status, code, message = "EMPTY", "204", "수집 결과 없음"
 	elif has_timeout or has_error:
