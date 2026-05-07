@@ -24,6 +24,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 import traceback
 import json
+from datetime import datetime
 
 
 if sys.platform.startswith("win"):
@@ -43,6 +44,8 @@ CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내
 # CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
 # CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
 # CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"			# 운영 cms
+
+FIELD_LOGS_DIR = "field_logs"
 
 # =========================
 # Request / Response Model
@@ -317,6 +320,45 @@ def replace_query_param(url: str, param_name: str, param_value: str) -> str:
 	))
 
 
+def audit_fields_minutes(
+	mints_cn: str,
+	url: Optional[str],
+	item_cols: list[str],
+	fields: dict[str, Optional[str]],
+) -> dict:
+	collected, missing = [], []
+	for col in sorted(set(item_cols)):
+		val = fields.get(col)
+		if val is not None and str(val).strip():
+			collected.append(col)
+		else:
+			missing.append(col)
+
+	return {
+		"mints_cn":  mints_cn,
+		"URL":       url,
+		"collected": collected,
+		"empty":     [],
+		"missing":   missing,
+	}
+
+
+def save_field_logs(field_logs: list, request) -> None:
+	now = datetime.now()
+	path = os.path.join(
+		FIELD_LOGS_DIR,
+		request.type,
+		request.crw_id or "unknown",
+		now.strftime("%Y"),
+		now.strftime("%m"),
+		f"{request.req_id}.json",
+	)
+	os.makedirs(os.path.dirname(path), exist_ok=True)
+	with open(path, "w", encoding="utf-8") as f:
+		json.dump({FIELD_LOGS_DIR: field_logs}, f, ensure_ascii=False, indent=4)
+	print(f"[+] field_logs 저장: {path} ({len(field_logs)}건)", flush=True)
+
+
 # =========================
 # List parsing
 # =========================
@@ -478,19 +520,19 @@ def merge_spch_rows(
 # =========================
 
 def is_paging_area(tag) -> bool:
-    parent = tag
-    while parent:
-        classes = parent.get("class", [])
-        class_text = " ".join(classes) if isinstance(classes, list) else str(classes)
-        tag_id = parent.get("id", "")
-        marker = f"{class_text} {tag_id}"
+	parent = tag
+	while parent:
+		classes = parent.get("class", [])
+		class_text = " ".join(classes) if isinstance(classes, list) else str(classes)
+		tag_id = parent.get("id", "")
+		marker = f"{class_text} {tag_id}"
 
-        if re.search(r"page|paging|pager|pagination|navi", marker, re.I):
-            return True
+		if re.search(r"page|paging|pager|pagination|navi", marker, re.I):
+			return True
 
-        parent = parent.parent
+		parent = parent.parent
 
-    return False
+	return False
 
 
 def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], list[int]]:
@@ -535,67 +577,67 @@ def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], l
 
 
 async def fetch_pages_by_playwright_click(
-    url: str,
-    request: SpchCrawlRequest,
+	url: str,
+	request: SpchCrawlRequest,
 ) -> list[tuple[str, str]]:
-    pages = []
-    seen_signatures = set()
+	pages = []
+	seen_signatures = set()
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            ignore_https_errors=(request.param.ssl_mode == "N"),
-        )
-        page = await context.new_page()
-        await page.goto(url, wait_until="networkidle", timeout=30000)
-        await page.wait_for_timeout(1000)
+	async with async_playwright() as p:
+		browser = await p.chromium.launch(headless=True)
+		context = await browser.new_context(
+			user_agent=USER_AGENT,
+			ignore_https_errors=(request.param.ssl_mode == "N"),
+		)
+		page = await context.new_page()
+		await page.goto(url, wait_until="networkidle", timeout=30000)
+		await page.wait_for_timeout(1000)
 
-        for page_no in range(1, request.param.max_pages + 1):
-            html = await page.content()
+		for page_no in range(1, request.param.max_pages + 1):
+			html = await page.content()
 
-            candidates = extract_list_candidates(
-                html=html,
-                list_root_selector=request.param.list_root_selector,
-                item_selector=request.param.item_selector,
-                target_selector=request.param.target_selector,
-                limit=None,
-            )
+			candidates = extract_list_candidates(
+				html=html,
+				list_root_selector=request.param.list_root_selector,
+				item_selector=request.param.item_selector,
+				target_selector=request.param.target_selector,
+				limit=None,
+			)
 
-            if not candidates:
-                break
+			if not candidates:
+				break
 
-            signature = "||".join(
-                f"{c.get('title', '')}|{c.get('href', '')}|{c.get('onclick', '')}"
-                for c in candidates[:10]
-            )
+			signature = "||".join(
+				f"{c.get('title', '')}|{c.get('href', '')}|{c.get('onclick', '')}"
+				for c in candidates[:10]
+			)
 
-            if signature in seen_signatures:
-                break
+			if signature in seen_signatures:
+				break
 
-            seen_signatures.add(signature)
-            pages.append((page.url, html))
+			seen_signatures.add(signature)
+			pages.append((page.url, html))
 
-            next_page_no = page_no + 1
-            if next_page_no > request.param.max_pages:
-                break
+			next_page_no = page_no + 1
+			if next_page_no > request.param.max_pages:
+				break
 
-            next_link = page.locator(
-                f"a.num:text-is('{next_page_no}'), "
-                f".pageForm a:text-is('{next_page_no}'), "
-                f".pageNavi a:text-is('{next_page_no}'), "
-                f"[class*='page'] a:text-is('{next_page_no}')"
-            ).first
+			next_link = page.locator(
+				f"a.num:text-is('{next_page_no}'), "
+				f".pageForm a:text-is('{next_page_no}'), "
+				f".pageNavi a:text-is('{next_page_no}'), "
+				f"[class*='page'] a:text-is('{next_page_no}')"
+			).first
 
-            if await next_link.count() == 0:
-                break
+			if await next_link.count() == 0:
+				break
 
-            await next_link.click()
-            await page.wait_for_timeout(1000)
+			await next_link.click()
+			await page.wait_for_timeout(1000)
 
-        await browser.close()
+		await browser.close()
 
-    return pages
+	return pages
 
 
 # =========================
@@ -1100,6 +1142,13 @@ async def crawl_spch_regex_check(
 		) from exc
 
 	is_multi = request.param.is_multi_spch == "Y"
+	field_logs: list[dict] = []
+	item_cols: list[str] = [
+		normalize_text(ri.col)
+		for ri in request.item
+		if normalize_text(ri.col)
+		and ri.regex and any(normalize_text(r) for r in ri.regex)
+	]
 	all_items: list[SpchItem] = []
 	seen_keys: set[str] = set()
 	visited_urls: set[str] = set()
@@ -1258,6 +1307,16 @@ async def crawl_spch_regex_check(
 				if crawl_all and dedupe_key in seen_keys:
 					continue
 				seen_keys.add(dedupe_key)
+				
+				# ── 필드 감사 로그 ──
+				if item.detail_access_success and item.fields:
+					field_logs.append(audit_fields_minutes(
+						mints_cn=item.uid or "",
+						url=item.detail_url,
+						item_cols=item_cols,
+						fields=item.fields,
+					))
+		
 				item.rank = len(all_items) + 1
 				all_items.append(item)
 
@@ -1266,6 +1325,9 @@ async def crawl_spch_regex_check(
 			status_code=422,
 			detail="지정한 selector 기준으로 목록 item 또는 target을 찾지 못했습니다.",
 		)
+	
+	if field_logs:
+		save_field_logs(field_logs, request)
 
 	return SpchCrawlResponse(
 		list_url=str(request.param.list_url),

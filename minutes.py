@@ -1749,6 +1749,7 @@ async def crawl_minutes_regex_check(
 				continue
 
 			seen_keys.add(dedupe_key)
+
 			# ── 필드 감사 로그 ──
 			if item.detail_access_success and item.fields:
 				field_logs.append(audit_fields_minutes(
