@@ -29,7 +29,7 @@ _MAX_CONSECUTIVE_FAIL = 5
 _DATE_PATTERN         = re.compile(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})')
 _FILE_SKIP_COLS = {"BI_FILE_NM", "BI_FILE_URL", "BI_FILE_PATH", "BI_FILE_ID"}
 _LAST_DATA_MATCH_KEYS = ["URL", "BI_SJ", "BI_CN", "BI_NO"]
-_POLICY_FILE_COLS = {"ORG_FILE_NM", "DOWNPATH", "DOWNID", "DOWN_URL"}
+_POLICY_FILE_COLS = {"ORG_FILE_NM", "DOWNPATH", "DOWNID", "DOWNURL"}
 MAX_FILE_SIZE_BYTES   = 20 * 1024 * 1024   # 20MB
 
 # ── BI_NO / RASMBLY_NUMPR_SESN 파서 ──────────────────────────────
@@ -102,8 +102,6 @@ class PolicyParam(BaseModel):
     paging_selector:       str           = Field("div#pagingNav")
     next_btn_selector:     str           = Field("a.num_right")
     end_btn_selector:      str           = Field("a.num_last")
-    bbs_id:                str           = Field("0")
-    bbs_name:              str           = Field("0")
     timeout:               str           = Field("20000")
     @field_validator("timeout", mode="before")
     @classmethod
@@ -179,6 +177,7 @@ class PolicyRequest(BaseModel):
     type:      str             = Field(..., min_length=1)
     crw_id:    str             = Field(..., min_length=1)
     file_dir:  str             = Field(...)
+    bbs_id:    str             = Field(..., min_length=1)
     param:     PolicyParam     = Field(...)
     item:      List[RegexItem] = Field(default_factory=list)
     last_data: Optional[LastData] = None
@@ -391,11 +390,9 @@ def build_file_save_path(file_dir, crawl_type, crw_id, rasmbly_numpr, year, mint
     return os.path.join(file_dir, crawl_type, crw_id or "unknown", safe, year, f"{mints_cn}_{seq}.{ext}")
 
 def build_policy_save_path(req, year, outbbs_cn, seq, ext):
-    p = req.param
-    bbs_id   = p.bbs_id   or "0"
-    bbs_name = p.bbs_name or "0"
-    path = os.path.join("/", req.file_dir, f"{req.type}info",
-                        bbs_id, bbs_name, year,
+    bbs_id = req.bbs_id or "0"
+    path = os.path.join("/", req.file_dir, req.type,
+                        req.crw_id, bbs_id, year,
                         f"{outbbs_cn}_attach_{seq}{ext}")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
@@ -1146,35 +1143,58 @@ async def _extract_policy_attachments(page, view_class, base_url, req, outbbs_cn
                     if not link_sel:
                         raise ValueError(f"JS 링크 셀렉터 없음: {raw_url_clean}")
                 else:
-                    # 실제 URL → httpx 직접 다운로드
-                    full_url = urljoin(base_url, raw_url_clean)
+                    # 실제 URL → httpx 우선, 실패 시 Playwright 클릭 fallback
+                    full_url = urljoin(base_url, "/" + raw_url_clean) if not raw_url_clean.startswith(("http", "/")) else urljoin(base_url, raw_url_clean)
+                    
+                    # httpx 시도
+                    httpx_ok = False
                     try:
                         async with httpx.AsyncClient(
                                 headers={"User-Agent": USER_AGENT},
                                 timeout=httpx.Timeout(60.0, connect=10.0),
                                 follow_redirects=True, verify=certifi.where()) as client:
                             r = await client.get(full_url); r.raise_for_status()
+                            ct = r.headers.get("content-type", "")
+                            # 404 리다이렉트나 HTML 응답이면 실패로 간주
+                            if "text/html" in ct or len(r.content) < 100:
+                                raise ValueError(f"유효하지 않은 응답: {ct}")
                         if len(r.content) > MAX_FILE_SIZE_BYTES:
                             print(f"[*] [POLICY] 크기 초과 → 스킵: {hint_name}", flush=True)
-                        else:
-                            cd = r.headers.get("content-disposition", "")
-                            cd_name = None
-                            if cd:
-                                m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)',
-                                              cd, re.IGNORECASE)
-                                if m: cd_name = unquote(m.group(1).strip())
-                            resolved_name = normalize_text(hint_name or cd_name) or f"file_{seq}"
-                            _, ext = os.path.splitext(resolved_name)
-                            if not ext: ext = ".bin"
-                            save_path = build_policy_save_path(req, year, outbbs_cn, seq, ext)
-                            with open(save_path, "wb") as f: f.write(r.content)
-                            save_path = save_path.replace("\\", "/")
-                            print(f"[+] [POLICY] 저장: {resolved_name} → {save_path}", flush=True)
+                            attachments.append({"original_name": resolved_name, "file_path": save_path,
+                                                "file_id": str(seq), "url": full_url, "file_type": "A"})
+                            continue
+                        cd = r.headers.get("content-disposition", ""); cd_name = None
+                        if cd:
+                            m = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)', cd, re.IGNORECASE)
+                            if m: cd_name = unquote(m.group(1).strip())
+                        resolved_name = normalize_text(hint_name or cd_name) or f"file_{seq}"
+                        _, ext = os.path.splitext(resolved_name)
+                        if not ext: ext = ".bin"
+                        save_path = build_policy_save_path(req, year, outbbs_cn, seq, ext)
+                        with open(save_path, "wb") as f: f.write(r.content)
+                        save_path = save_path.replace("\\", "/")
+                        print(f"[+] [POLICY] 저장: {resolved_name} → {save_path}", flush=True)
+                        httpx_ok = True
                     except Exception as e:
-                        print(f"[-] [POLICY] httpx 실패 ({full_url}): {str(e)[:120]}", flush=True)
-                    attachments.append({"original_name": resolved_name, "file_path": save_path,
-                                         "file_id": str(seq), "url": full_url})
-                    continue  # Playwright 클릭 블록 건너뜀
+                        print(f"[*] [POLICY] httpx 실패 → Playwright fallback: {str(e)[:80]}", flush=True)
+
+                    if httpx_ok:
+                        attachments.append({"original_name": resolved_name, "file_path": save_path,
+                                            "file_id": str(seq), "url": full_url, "file_type": "A"})
+                        continue  # Playwright 건너뜀
+
+                    # httpx 실패 → Playwright 클릭 fallback
+                    qs_pairs  = parse_qsl(urlparse(raw_url_clean).query)
+                    path_part = urlparse(raw_url_clean).path
+                    link_sel  = None
+                    for k, v in reversed(qs_pairs):
+                        candidate = f"a[href*='{k}={v}']"
+                        try:
+                            if await page.locator(candidate).count() >= 1:
+                                link_sel = candidate; break
+                        except Exception: continue
+                    if not link_sel:
+                        link_sel = f"a[href*='{path_part}']" if path_part and path_part != "/" else "a.attachment"
                 
                 link = page.locator(link_sel).first
                 if await link.count() == 0:
@@ -1194,7 +1214,7 @@ async def _extract_policy_attachments(page, view_class, base_url, req, outbbs_cn
                     return name, path, dl.url
 
                 try:
-                    resolved_name, save_path, full_url = await asyncio.wait_for(_do_download(), timeout=7.0)
+                    resolved_name, save_path, full_url = await asyncio.wait_for(_do_download(), timeout=10.0)
                     file_size = os.path.getsize(save_path)
                     if file_size > MAX_FILE_SIZE_BYTES:
                         os.remove(save_path); save_path = ""
@@ -1222,6 +1242,7 @@ async def _extract_policy_attachments(page, view_class, base_url, req, outbbs_cn
                 "file_path":     save_path,
                 "file_id":       str(seq),
                 "url":           full_url,
+                "file_type":     "A",
             })
         if attachments:
             return _pack_attachment_result(attachments)
@@ -1278,7 +1299,7 @@ async def _extract_policy_attachments(page, view_class, base_url, req, outbbs_cn
                     save_path = save_path.replace("\\", "/")
                     print(f"[+] [POLICY fallback] 저장: {save_path}", flush=True)
                 attachments.append({"original_name": resolved_name, "file_path": save_path,
-                                     "file_id": str(seq), "url": dl_url})
+                                     "file_id": str(seq), "url": dl_url, "file_type": "A"})
             except asyncio.TimeoutError:
                 print(f"[*] [POLICY fallback] 10초 초과 → 스킵: {raw}", flush=True)
                 attachments.append({"original_name": raw, "file_path": "",
@@ -1303,16 +1324,18 @@ async def _extract_policy_attachments(page, view_class, base_url, req, outbbs_cn
  
 def _pack_attachment_result(attachments: list) -> dict:
     """첨부파일 리스트 → policy DB 컬럼 dict 변환"""
-    names = [a["original_name"] for a in attachments]
-    paths = [a["file_path"]     for a in attachments]
-    ids   = [a["file_id"]       for a in attachments]
-    urls  = [a["url"]           for a in attachments]
+    names  = [a["original_name"] for a in attachments]
+    paths  = [a["file_path"]     for a in attachments]
+    ids    = [a["file_id"]       for a in attachments]
+    urls   = [a["url"]           for a in attachments]
+    types  = [a.get("file_type", "A") for a in attachments]
     def one_or_json(lst): return lst[0] if len(lst) == 1 else json.dumps(lst, ensure_ascii=False)
     return {
         "ORG_FILE_NM": one_or_json(names),
         "DOWNPATH":    one_or_json(paths),
         "DOWNID":      one_or_json(ids),
         "DOWNURL":     one_or_json(urls),
+        "FILE_TYPE":   one_or_json(types),
     }
 
 # ── bill 실행 엔진 ────────────────────────────────────────────────
@@ -1807,7 +1830,7 @@ async def execute_policy_scraping(req: PolicyRequest):
                     outbbs_cn  = f"CLIKC{str(time.time_ns())[:16]}"
                     list_title = list_item.get("BI_SJ", "")
                     detail     = parse_policy_detail(detail_html, req.item, list_title=list_title)
-                    year = str(datetime.now().year)
+                    year       = (detail.get("CDATE") or "")[:4] or str(datetime.now().year)
 
                     # 1. 파일 첨부 먼저
                     if has_file_item:
@@ -1825,6 +1848,7 @@ async def execute_policy_scraping(req: PolicyRequest):
                             "DOWNPATH":    file_result.get("DOWNPATH",    ""),
                             "DOWNID":      file_result.get("DOWNID",      ""),
                             "DOWNURL":     file_result.get("DOWNURL",     ""),
+                            "FILE_TYPE":   file_result.get("FILE_TYPE",   ""),
                         })
 
                     # 2. 이미지 수집 후 파일 배열에 합산
@@ -1863,12 +1887,14 @@ async def execute_policy_scraping(req: PolicyRequest):
                             paths = to_list(detail.get("DOWNPATH",    "") or "")
                             ids   = to_list(detail.get("DOWNID",      "") or "")
                             urls  = to_list(detail.get("DOWNURL",     "") or "")
+                            types = to_list(detail.get("FILE_TYPE",   "") or "")
 
                             for img in img_results:
                                 nms.append(os.path.basename(img["path"]))
                                 paths.append(img["path"])
                                 ids.append(str(len(ids) + 1))
                                 urls.append(img["url"])
+                                types.append("I")
 
                             def one_or_json(lst):
                                 return lst[0] if len(lst) == 1 else json.dumps(lst, ensure_ascii=False)
@@ -1877,6 +1903,7 @@ async def execute_policy_scraping(req: PolicyRequest):
                             detail["DOWNPATH"]    = one_or_json(paths)
                             detail["DOWNID"]      = one_or_json(ids)
                             detail["DOWNURL"]     = one_or_json(urls)
+                            detail["FILE_TYPE"]   = one_or_json(types)
                             detail.pop("IMAGEPATH", None)
  
                     collected_item = {
@@ -1981,7 +2008,7 @@ async def execute_policy_scraping_test(req: PolicyRequest):
                 outbbs_cn = f"CLIKC{str(time.time_ns())[:16]}"
                 list_title = item.get("BI_SJ", "")
                 detail    = parse_policy_detail(detail_html, req.item, list_title=list_title)
-                year      = str(datetime.now().year)
+                year      = (detail.get("CDATE") or "")[:4] or str(datetime.now().year)
  
                 # ── DOWNURL JS 변환 ──────────────────────────────────
                 raw_down = detail.get("DOWNURL", "")
@@ -2022,6 +2049,7 @@ async def execute_policy_scraping_test(req: PolicyRequest):
                         "DOWNPATH":    file_result.get("DOWNPATH",    ""),
                         "DOWNID":      file_result.get("DOWNID",      ""),
                         "DOWNURL":     file_result.get("DOWNURL",     ""),
+                        "FILE_TYPE":   file_result.get("FILE_TYPE",   ""),
                     })
  
                 # 2. 이미지 수집 후 파일 배열에 합산
@@ -2062,12 +2090,14 @@ async def execute_policy_scraping_test(req: PolicyRequest):
                         paths = to_list(detail.get("DOWNPATH",    "") or "")
                         ids   = to_list(detail.get("DOWNID",      "") or "")
                         urls  = to_list(detail.get("DOWNURL",     "") or "")
- 
+                        types = to_list(detail.get("FILE_TYPE",   "") or "")
+
                         for img in img_results:
                             nms.append(os.path.basename(img["path"]))
                             paths.append(img["path"])
                             ids.append(str(len(ids) + 1))
                             urls.append(img["url"])
+                            types.append("I")
  
                         def one_or_json(lst):
                             return lst[0] if len(lst) == 1 else json.dumps(lst, ensure_ascii=False)
@@ -2076,6 +2106,7 @@ async def execute_policy_scraping_test(req: PolicyRequest):
                         detail["DOWNPATH"]    = one_or_json(paths)
                         detail["DOWNID"]      = one_or_json(ids)
                         detail["DOWNURL"]     = one_or_json(urls)
+                        detail["FILE_TYPE"]   = one_or_json(types)
                         detail.pop("IMAGEPATH", None)
  
                 view_data.append({
@@ -2118,9 +2149,12 @@ def _route_request(raw: UnifiedRequest):
     if raw.type in ("bill", "policy"):
         param_cls = ScrapeParam if raw.type == "bill" else PolicyParam
         req_cls   = ScrapeRequest if raw.type == "bill" else PolicyRequest
-        return req_cls(req_id=raw.req_id, type=raw.type, crw_id=raw.crw_id, file_dir=raw.file_dir,
-                       param=param_cls(**raw.param), item=raw.item,
-                       last_data=LastData(**raw.last_data) if raw.last_data else None)
+        extra     = raw.model_extra or {}
+        return req_cls(
+            req_id=raw.req_id, type=raw.type, crw_id=raw.crw_id, file_dir=raw.file_dir,
+            bbs_id=extra.get("bbs_id", "0"),
+            param=param_cls(**raw.param), item=raw.item,
+            last_data=LastData(**raw.last_data) if raw.last_data else None)
     raise ValueError(f"지원하지 않는 type: '{raw.type}' (bill / policy / laman 중 하나여야 합니다)")
 
 @app.post("/crawl", status_code=202)
