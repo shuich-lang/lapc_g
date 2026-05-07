@@ -18,6 +18,7 @@ requests/
 
 # 로그 파일
 logs/
+field_logs/
 
 # 에디터
 .vscode/

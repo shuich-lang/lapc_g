@@ -14,6 +14,7 @@ from urllib.parse import (
 	unquote,
 )
 import os
+import json
 
 import certifi
 import httpx
@@ -46,6 +47,8 @@ CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 개발서�
 # CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"		# 국회 cms
 
 FILE_EXTENSIONS = ("pdf", "hwp", "hwpx", "doc", "docx", "xls", "xlsx", "zip")
+
+FIELD_LOGS_DIR = "field_logs"
 
 
 # =========================
@@ -524,30 +527,73 @@ def matches_last_data(
 	return True
 
 
+def audit_fields_minutes(
+	mints_cn: str,
+	url: Optional[str],
+	item_cols: list[str],
+	fields: dict[str, Optional[str]],
+) -> dict:
+	"""
+	수집 결과 fields를 request.item의 col 목록과 비교해
+	collected / empty(회의록 미사용) / missing 세 버킷으로 분류한 감사 로그 반환.
+	"""
+	collected, missing = [], []
+	for col in sorted(set(item_cols)):
+		val = fields.get(col)
+		if val is None and col not in fields:
+			missing.append(col)
+		else:
+			collected.append(col)
+
+	return {
+		"mints_cn":  mints_cn,
+		"URL":       url,
+		"collected": collected,
+		"empty":     [],
+		"missing":   missing,
+	}
+
+
+def save_field_logs(field_logs: list, request: "RegexCrawlRequest") -> None:
+	now = datetime.now()
+	path = os.path.join(
+		FIELD_LOGS_DIR,
+		request.type,
+		request.crw_id,
+		now.strftime("%Y"),
+		now.strftime("%m"),
+		f"{request.req_id}.json",
+	)
+	os.makedirs(os.path.dirname(path), exist_ok=True)
+	with open(path, "w", encoding="utf-8") as f:
+		json.dump({FIELD_LOGS_DIR: field_logs}, f, ensure_ascii=False, indent=4)
+	print(f"[+] field_logs 저장: {path} ({len(field_logs)}건)", flush=True)
+
+
 def _build_result(data_list: list, error_logs: list, error: str = "") -> dict:
-    """수집 결과 상태 자동 판별 (bill.py 스펙 호환)"""
-    has_timeout = any("Timeout" in (e.get("note") or "") for e in error_logs)
-    has_error = len(error_logs) > 0
-    data_count = len(data_list)
+	"""수집 결과 상태 자동 판별 (bill.py 스펙 호환)"""
+	has_timeout = any("Timeout" in (e.get("note") or "") for e in error_logs)
+	has_error = len(error_logs) > 0
+	data_count = len(data_list)
 
-    if error:
-        status, code, message = "FAILED", "500", f"수집 실패: {error}"
-    elif data_count == 0 and has_timeout:
-        status, code, message = "TIMEOUT", "408", "타임아웃으로 수집 불가"
-    elif data_count == 0:
-        status, code, message = "EMPTY", "204", "수집 결과 없음"
-    elif has_timeout or has_error:
-        status, code, message = "PARTIAL", "206", "일부 수집 완료 (오류 포함)"
-    else:
-        status, code, message = "SUCCESS", "200", "수집 완료"
+	if error:
+		status, code, message = "FAILED", "500", f"수집 실패: {error}"
+	elif data_count == 0 and has_timeout:
+		status, code, message = "TIMEOUT", "408", "타임아웃으로 수집 불가"
+	elif data_count == 0:
+		status, code, message = "EMPTY", "204", "수집 결과 없음"
+	elif has_timeout or has_error:
+		status, code, message = "PARTIAL", "206", "일부 수집 완료 (오류 포함)"
+	else:
+		status, code, message = "SUCCESS", "200", "수집 완료"
 
-    return {
-        "status": status,
-        "code": code,
-        "message": message,
-        "dataCount": data_count,
-        "interrupted": False,  # 회의록은 중단 API 미지원 → 항상 False
-    }
+	return {
+		"status": status,
+		"code": code,
+		"message": message,
+		"dataCount": data_count,
+		"interrupted": False,  # 회의록은 중단 API 미지원 → 항상 False
+	}
 
 
 # =========================
@@ -662,19 +708,19 @@ def parse_minutes_detail_by_dynamic_regex(
 # =========================
 
 def is_paging_area(tag) -> bool:
-    parent = tag
-    while parent:
-        classes = parent.get("class", [])
-        class_text = " ".join(classes) if isinstance(classes, list) else str(classes)
-        tag_id = parent.get("id", "")
-        marker = f"{class_text} {tag_id}"
+	parent = tag
+	while parent:
+		classes = parent.get("class", [])
+		class_text = " ".join(classes) if isinstance(classes, list) else str(classes)
+		tag_id = parent.get("id", "")
+		marker = f"{class_text} {tag_id}"
 
-        if re.search(r"page|paging|pager|pagination|navi", marker, re.I):
-            return True
+		if re.search(r"page|paging|pager|pagination|navi", marker, re.I):
+			return True
 
-        parent = parent.parent
+		parent = parent.parent
 
-    return False
+	return False
 
 
 def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], list[int]]:
@@ -719,67 +765,67 @@ def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], l
 
 
 async def fetch_pages_by_playwright_click(
-    url: str,
-    request: RegexCrawlRequest,
+	url: str,
+	request: RegexCrawlRequest,
 ) -> list[tuple[str, str]]:
-    pages = []
-    seen_signatures = set()
+	pages = []
+	seen_signatures = set()
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            ignore_https_errors=(request.param.ssl_mode == "N"),
-        )
-        page = await context.new_page()
-        await page.goto(url, wait_until="networkidle", timeout=30000)
-        await page.wait_for_timeout(1000)
+	async with async_playwright() as p:
+		browser = await p.chromium.launch(headless=True)
+		context = await browser.new_context(
+			user_agent=USER_AGENT,
+			ignore_https_errors=(request.param.ssl_mode == "N"),
+		)
+		page = await context.new_page()
+		await page.goto(url, wait_until="networkidle", timeout=30000)
+		await page.wait_for_timeout(1000)
 
-        for page_no in range(1, request.param.max_pages + 1):
-            html = await page.content()
+		for page_no in range(1, request.param.max_pages + 1):
+			html = await page.content()
 
-            candidates = extract_list_candidates(
-                html=html,
-                list_root_selector=request.param.list_root_selector,
-                item_selector=request.param.item_selector,
-                target_selector=request.param.target_selector,
-                limit=None,
-            )
+			candidates = extract_list_candidates(
+				html=html,
+				list_root_selector=request.param.list_root_selector,
+				item_selector=request.param.item_selector,
+				target_selector=request.param.target_selector,
+				limit=None,
+			)
 
-            if not candidates:
-                break
+			if not candidates:
+				break
 
-            signature = "||".join(
-                f"{c.get('title', '')}|{c.get('href', '')}|{c.get('onclick', '')}"
-                for c in candidates[:10]
-            )
+			signature = "||".join(
+				f"{c.get('title', '')}|{c.get('href', '')}|{c.get('onclick', '')}"
+				for c in candidates[:10]
+			)
 
-            if signature in seen_signatures:
-                break
+			if signature in seen_signatures:
+				break
 
-            seen_signatures.add(signature)
-            pages.append((page.url, html))
+			seen_signatures.add(signature)
+			pages.append((page.url, html))
 
-            next_page_no = page_no + 1
-            if next_page_no > request.param.max_pages:
-                break
+			next_page_no = page_no + 1
+			if next_page_no > request.param.max_pages:
+				break
 
-            next_link = page.locator(
-                f"a.num:text-is('{next_page_no}'), "
-                f".pageForm a:text-is('{next_page_no}'), "
-                f".pageNavi a:text-is('{next_page_no}'), "
-                f"[class*='page'] a:text-is('{next_page_no}')"
-            ).first
+			next_link = page.locator(
+				f"a.num:text-is('{next_page_no}'), "
+				f".pageForm a:text-is('{next_page_no}'), "
+				f".pageNavi a:text-is('{next_page_no}'), "
+				f"[class*='page'] a:text-is('{next_page_no}')"
+			).first
 
-            if await next_link.count() == 0:
-                break
+			if await next_link.count() == 0:
+				break
 
-            await next_link.click()
-            await page.wait_for_timeout(1000)
+			await next_link.click()
+			await page.wait_for_timeout(1000)
 
-        await browser.close()
+		await browser.close()
 
-    return pages
+	return pages
 
 
 def extract_form_request_info(html: str, list_url: str) -> tuple[Optional[str], dict[str, str], Optional[str], list[int]]:
@@ -1596,6 +1642,16 @@ async def crawl_minutes_regex_check(
 			items=[],
 		)
 
+	field_logs: list[dict] = []
+	item_cols: list[str] = [
+		normalize_text(ri.col)
+		for ri in request.item
+		if normalize_text(ri.col)
+		and (
+			(ri.regex and any(normalize_text(r) for r in ri.regex))
+			or (ri.value is not None and normalize_text(ri.value))
+		)
+	]
 	all_items: list[MinutesItem] = []
 	seen_keys: set[str] = set()
 	is_last_data_matched = False
@@ -1693,6 +1749,14 @@ async def crawl_minutes_regex_check(
 				continue
 
 			seen_keys.add(dedupe_key)
+			# ── 필드 감사 로그 ──
+			if item.detail_access_success and item.fields:
+				field_logs.append(audit_fields_minutes(
+					mints_cn=item.mints_cn,
+					url=item.detail_url,
+					item_cols=item_cols,
+					fields=item.fields,
+				))
 			item.rank = len(all_items) + 1
 			all_items.append(item)
 	
@@ -1711,6 +1775,9 @@ async def crawl_minutes_regex_check(
 			"url": str(request.param.list_url),
 			"error": "지정한 selector 기준으로 목록 item 또는 target을 찾지 못했습니다.",
 		})
+	
+	if field_logs:
+		save_field_logs(field_logs, request)
 
 	return CrawlResponse(
 		list_url=str(request.param.list_url),
