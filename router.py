@@ -24,6 +24,9 @@ from crawler import (
     PolicyRequest,
     execute_policy_scraping,
     execute_policy_scraping_test,
+    PrismRequest,
+    execute_prism_scraping,
+    execute_prism_scraping_test,
 )
 
 from minutes import (
@@ -84,7 +87,7 @@ async def run_spch_job(req_obj):
     except Exception:
         await set_job_failed(req_obj.req_id)
 
-async def run_policy_job(req_obj):          # ← 추가
+async def run_policy_job(req_obj):
     try:
         await set_job_running(req_obj.req_id)
         await execute_policy_scraping(req_obj)
@@ -92,6 +95,13 @@ async def run_policy_job(req_obj):          # ← 추가
     except Exception:
         await set_job_failed(req_obj.req_id)
 
+async def run_prism_job(req_obj):
+    try:
+        await set_job_running(req_obj.req_id)
+        await execute_prism_scraping(req_obj)
+        await set_job_done(req_obj.req_id)
+    except Exception:
+        await set_job_failed(req_obj.req_id)
 
 def handle_validation_error(e: ValidationError):
     errors = e.errors()
@@ -150,6 +160,12 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             req_obj = SpchCrawlRequest(**json_data)
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_spch_job, req_obj)
+
+        elif req_type == "prism":
+            raw = UnifiedRequest(**json_data)
+            req_obj = _route_request(raw)
+            await create_job(req_obj.req_id)
+            background_tasks.add_task(run_prism_job, req_obj)
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type: {req_type}"})
@@ -210,6 +226,11 @@ async def integrated_crawl_test_api(request: Request):
             req_obj = SpchCrawlRequest(**json_data)
             crawl_response = await crawl_spch_regex_check(req_obj, crawl_all=False)
             return build_spch_callback_payload(req_obj, crawl_response)
+        
+        elif req_type == "prism":
+            raw = UnifiedRequest(**json_data)
+            req_obj = _route_request(raw)
+            return await execute_prism_scraping_test(req_obj)
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type: {req_type}"})
@@ -244,7 +265,7 @@ async def integrated_crawl_stop():
     # ── bill / laman 중단 (crawler.py 공유 state) ─────────────────
     if not crawler_app.state.stop_scraping:
         crawler_app.state.stop_scraping = True
-        stopped.append("bill/laman/policy")
+        stopped.append("bill/laman/policy/prism")
         print("[!] stop_scraping = True", flush=True)
 
     if stopped:
