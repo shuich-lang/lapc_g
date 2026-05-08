@@ -71,10 +71,11 @@ class RegexItem(BaseModel):
 
 
 class SpchCrawlRequest(BaseModel):
-	req_id: str = Field(...)
-	crw_id: Optional[str] = Field(None)
-	type: str = Field(...)
-	param: SpchParam = Field(...)
+	req_id: str = Field(..., description="날짜 포맷: yyyyMMddHHmmssSSSSSS")
+	crw_id: str = Field(..., description="기관 코드")
+	bbs_id: str = Field(..., description="게시판 ID")
+	type: str = Field(..., description="수집 유형: minutes, bill 등")
+	param: SpchParam = Field(..., description="크롤링 파라미터")
 	item: list[RegexItem] = Field(default_factory=list)
 
 
@@ -1129,8 +1130,9 @@ def build_spch_callback_payload(
 
 	return {
 		"req_id": request.req_id,
-		"type": request.type,
 		"crw_id": request.crw_id,
+		"bbs_id": request.bbs_id,
+		"type": request.type,
 		"result": result_block,
 		"data": data,
 		"log": _error_logs
