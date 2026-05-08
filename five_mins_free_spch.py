@@ -1122,6 +1122,7 @@ def build_spch_callback_payload(
 				continue
 
 			seen_row_keys.add(dedupe_key)
+			data.reverse()  # 뒤집어서 앞에 추가 (최신이 앞에 오도록)
 			data.append(row)
 
 	result_block = _build_result(data, _error_logs, error=error)
