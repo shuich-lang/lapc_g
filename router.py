@@ -16,11 +16,9 @@ from crawler import (
     app as crawler_app,
     UnifiedRequest,
     ScrapeRequest,
-    LamanRequest,
     _route_request,
     execute_bill_scraping,
     execute_bill_scraping_test,
-    execute_laman_scraping,
 )
 
 from minutes import (
@@ -44,6 +42,13 @@ from policy import (
     execute_policy_scraping,
     execute_policy_scraping_test as policy_test,
 )
+from laman import (
+    app as laman_app,
+    LamanCrawlRequest,
+    crawl_laman_regex_check,
+    build_laman_callback_payload,
+    run_laman_all_and_callback,
+)
 from crawl_status import create_job, get_job, set_job_running, set_job_done, set_job_failed
 
 router = APIRouter()
@@ -59,14 +64,6 @@ async def run_bill_job(req_obj):
     try:
         await set_job_running(req_obj.req_id)
         await execute_bill_scraping(req_obj)
-        await set_job_done(req_obj.req_id)
-    except Exception:
-        await set_job_failed(req_obj.req_id)
-
-async def run_laman_job(req_obj):
-    try:
-        await set_job_running(req_obj.req_id)
-        await execute_laman_scraping(req_obj)
         await set_job_done(req_obj.req_id)
     except Exception:
         await set_job_failed(req_obj.req_id)
@@ -91,6 +88,14 @@ async def run_policy_job(req_obj):
     try:
         await set_job_running(req_obj.req_id)
         await execute_policy_scraping(req_obj)
+        await set_job_done(req_obj.req_id)
+    except Exception:
+        await set_job_failed(req_obj.req_id)
+
+async def run_laman_job(req_obj):
+    try:
+        await set_job_running(req_obj.req_id)
+        await run_laman_all_and_callback(req_obj)
         await set_job_done(req_obj.req_id)
     except Exception:
         await set_job_failed(req_obj.req_id)
@@ -130,13 +135,6 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             req_obj = _route_request(raw)          # ScrapeRequest 반환
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_bill_job, req_obj)
-
-        elif req_type == "laman":
-            raw = UnifiedRequest(**json_data)
-            req_obj = _route_request(raw)          # LamanRequest 반환
-            await create_job(req_obj.req_id)
-            background_tasks.add_task(run_laman_job, req_obj)
-
         elif "minutes" in req_type:
             raw = CrawlRequest(**json_data)
             req_obj = parse_crawl_request(raw)
@@ -152,6 +150,12 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             req_obj = PolicyRequest(**json_data)
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_policy_job, req_obj)
+
+        elif "laman" in req_type:
+            req_obj = LamanCrawlRequest(**json_data)
+            await create_job(req_obj.req_id)
+            background_tasks.add_task(run_laman_job, req_obj)
+
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type: {req_type}"})
@@ -192,10 +196,10 @@ async def integrated_crawl_test_api(request: Request):
             req_obj = _route_request(raw)
             return await execute_bill_scraping_test(req_obj)
 
-        elif req_type == "laman":
-            raw = UnifiedRequest(**json_data)
-            req_obj = _route_request(raw)
-            return await execute_laman_scraping(req_obj)
+        # elif req_type == "laman":
+        #     raw = UnifiedRequest(**json_data)
+        #     req_obj = _route_request(raw)
+        #     return await execute_laman_scraping(req_obj)
 
         elif req_type == "minutes":
             raw = CrawlRequest(**json_data)
@@ -211,6 +215,11 @@ async def integrated_crawl_test_api(request: Request):
         elif req_type == "policy":
             req_obj = PolicyRequest(**json_data)
             return await policy_test(req_obj)
+        
+        elif req_type == "laman":
+            req_obj = LamanCrawlRequest(**json_data)
+            crawl_response = await crawl_laman_regex_check(req_obj, crawl_all=False)
+            return build_laman_callback_payload(req_obj, crawl_response)
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type: {req_type}"})
