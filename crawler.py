@@ -10,6 +10,7 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, Field, HttpUrl, field_validator, ValidationInfo
+import json as _json
 
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -111,16 +112,11 @@ class PolicyParam(BaseModel):
         return str(v)
     
 class PrismParam(BaseModel):
-    list_url:          str           = Field(...)
-    view_url:          Optional[str] = None
-    view_id_param:     str           = Field("researchId")
-    list_class:        str           = Field("table.tstyle_list")
-    view_class:        Optional[str] = None
-    max_pages:         str           = Field("")
-    paging_selector:   str           = Field("div.pagination")
-    next_btn_selector: str           = Field("a.page-navi.next")
-    end_btn_selector:  str           = Field("a.page-link:last-child")
-    timeout:           str           = Field("20000")
+    list_url:       str           = Field(...)
+    list_api_url:   Optional[str] = Field(None)   # 리스트 API (없으면 Playwright 클릭)
+    detail_api_url: str           = Field(...)     # 상세 API
+    max_pages:      str           = Field("")
+    timeout:        str           = Field("20000")
  
     @field_validator("timeout", mode="before")
     @classmethod
@@ -1127,70 +1123,70 @@ def _extract_all_matches(html: str, patterns: list) -> list:
 # crawler.py 의 _collect_pages / BillListCrawler 대신 사용
 # execute_prism_scraping 의 1단계를 이 함수로 교체
 # ══════════════════════════════════════════════════════════════
- 
 async def _collect_prism_list(
     page,
     list_url: str,
+    list_api_url: Optional[str] = None,
     max_pages: str = "",
     stop_check=None,
     last_sig: dict = None,
     timeout: int = 20000,
 ) -> tuple:
+    """리스트 수집. list_api_url 있으면 API 직접 호출, 없으면 Playwright 클릭 방식.
+    """
     if stop_check is None:
         stop_check = lambda: False
-
+ 
+    # list_api_url 있으면 API 방식으로 수집
+    if list_api_url:
+        return await _fetch_prism_list_api(
+            list_url, list_api_url, max_pages, stop_check, last_sig, timeout)
+ 
+    # Playwright 클릭 방식 (list_api_url 없을 때 fallback)
     data, error_logs = [], []
     last_data_reached = False
     safe_max = int(max_pages.strip()) if max_pages and max_pages.strip().isdigit() else 0
-
+ 
     await page.goto(list_url, wait_until="domcontentloaded", timeout=timeout)
-    await page.wait_for_timeout(5000)  # React 렌더링 대기
+    await page.wait_for_timeout(5000)
     try:
         await page.wait_for_selector("table.tstyle_list tbody tr", timeout=timeout)
     except Exception:
         error_logs.append({"step": "리스트_로드", "url": list_url, "error": "테이블 로드 실패"})
         return data, error_logs, last_data_reached
-
+ 
     total_pages = await _get_prism_total_pages(page)
     target = total_pages if safe_max == 0 else min(safe_max, total_pages)
     print(f"[PRISM] 총 {total_pages}p → 수집 대상 {target}p", flush=True)
-
+ 
     current_page = 1
     while current_page <= target:
         if stop_check():
             print("[PRISM] 중단 요청", flush=True)
             break
-
+ 
         print(f"[PRISM] 리스트 {current_page}/{target}p 수집", flush=True)
-
-        # 현재 페이지 행 제목만 미리 수집 (ElementHandle 저장 안 함)
+ 
         rows = await page.query_selector_all("table.tstyle_list tbody tr")
         titles = []
         for row in rows:
             title_el = await row.query_selector("a.ellipsis")
             title = clean_text(await title_el.inner_text()) if title_el else ""
             titles.append(title)
-
-        row_count = len(titles)
-
-        # 각 행 인덱스로 접근 → 클릭마다 새로 쿼리
-        for idx in range(row_count):
+ 
+        for idx in range(len(titles)):
             if stop_check():
                 break
-
             title = titles[idx]
-
             try:
-                # ← 매번 새로 쿼리 (뒤로가기 후 React 재렌더링 대응)
-                rows_fresh = await page.query_selector_all(
-                    "table.tstyle_list tbody tr")
+                rows_fresh = await page.query_selector_all("table.tstyle_list tbody tr")
                 if idx >= len(rows_fresh):
                     raise ValueError(f"행 인덱스 초과: {idx} >= {len(rows_fresh)}")
-
+ 
                 title_a = await rows_fresh[idx].query_selector("a.ellipsis")
                 if not title_a:
                     continue
-
+ 
                 current_url = page.url
                 await title_a.click()
                 await page.wait_for_function(
@@ -1201,70 +1197,203 @@ async def _collect_prism_list(
                 asmt_id = new_url.rstrip("/").split("/")[-1]
                 if asmt_id == "list" or not asmt_id:
                     raise ValueError(f"asmtId 추출 실패: {new_url}")
-
-                list_item = {
-                    "view_id":   asmt_id,
-                    "link_href": new_url,
-                    "BI_SJ":     title,
-                }
-
+ 
+                list_item = {"view_id": asmt_id, "link_href": new_url, "BI_SJ": title}
+                print(f"  [{idx+1}] {title[:30]} → {asmt_id}", flush=True)
+ 
                 if last_sig and is_list_item_past_last(list_item, last_sig):
                     last_data_reached = True
                     await page.go_back(wait_until="domcontentloaded", timeout=timeout)
-                    await page.wait_for_selector(
-                        "table.tstyle_list tbody tr", timeout=5000)
+                    await page.wait_for_selector("table.tstyle_list tbody tr", timeout=5000)
                     break
-
+ 
                 data.append(list_item)
-
+ 
             except Exception as e:
-                print(f"  [{idx+1}] 클릭 실패 ({title[:20]}): {str(e)[:80]}",
-                      flush=True)
+                print(f"  [{idx+1}] 클릭 실패 ({title[:20]}): {str(e)[:80]}", flush=True)
                 error_logs.append({"step": f"리스트_클릭_{current_page}p_{idx+1}번",
                                    "title": title, "error": str(e)[:200]})
             finally:
                 if "asmt/list" not in page.url:
                     try:
-                        await page.go_back(wait_until="domcontentloaded",
-                                           timeout=timeout)
-                        await page.wait_for_selector(
-                            "table.tstyle_list tbody tr", timeout=5000)
-                        await page.wait_for_timeout(500)  # React 재렌더링 대기
+                        await page.go_back(wait_until="domcontentloaded", timeout=timeout)
+                        await page.wait_for_selector("table.tstyle_list tbody tr", timeout=5000)
+                        await page.wait_for_timeout(500)
                     except Exception:
-                        await page.goto(list_url, wait_until="domcontentloaded",
-                                        timeout=timeout)
+                        await page.goto(list_url, wait_until="domcontentloaded", timeout=timeout)
                         await page.wait_for_timeout(5000)
                         if current_page > 1:
                             await _go_to_prism_page(page, current_page, timeout)
-
+ 
         if last_data_reached:
             break
-
+ 
         if current_page < target:
             ok = await _go_to_prism_page(page, current_page + 1, timeout)
             if not ok:
                 print(f"[PRISM] {current_page+1}p 이동 실패 → 중단", flush=True)
                 break
-
+ 
         current_page += 1
-
+ 
+    return data, error_logs, last_data_reached
+ 
+async def _fetch_prism_list_api(
+    list_url: str,
+    list_api_url: str,
+    max_pages: str = "",
+    stop_check=None,
+    last_sig: dict = None,
+    timeout: int = 20000,
+) -> tuple:
+    """
+    list_api_url 에 페이지별 POST 요청 → asmtId 목록 수집.
+    응답 구조: resultData.list[].asmtId (실제 키는 로그로 확인 후 조정)
+    """
+    if stop_check is None:
+        stop_check = lambda: False
+ 
+    data, error_logs = [], []
+    last_data_reached = False
+    safe_max = int(max_pages.strip()) if max_pages and max_pages.strip().isdigit() else 0
+    base_url = "{u.scheme}://{u.netloc}".format(u=urlparse(list_url))
+ 
+    page_no = 1
+    while True:
+        if stop_check():
+            print("[PRISM] 중단 요청", flush=True)
+            break
+ 
+        payload = {"currentPage": page_no, "pageSize": 10, "pageYn": "Y"}
+        try:
+            async with httpx.AsyncClient(
+                headers={
+                    "User-Agent":   USER_AGENT,
+                    "Content-Type": "application/json",
+                    "Referer":      list_url,
+                    "Origin":       base_url,
+                },
+                timeout=httpx.Timeout(float(timeout) / 1000, connect=10.0),
+                follow_redirects=True,
+                verify=False,
+            ) as client:
+                r = await client.post(list_api_url, json=payload)
+                r.raise_for_status()
+                raw = r.json()
+        except Exception as e:
+            error_logs.append({"step": f"리스트API_{page_no}p", "error": str(e)[:200]})
+            print(f"[PRISM] 리스트 API 실패 ({page_no}p): {e}", flush=True)
+            break
+ 
+        # 응답 구조 탐색 (첫 페이지만 로그)
+        if page_no == 1:
+            print(f"[PRISM] 리스트 API keys: {list(raw.keys())}", flush=True)
+ 
+        # 총 페이지 / 항목 추출
+        total_count = (raw.get("totalCount") or raw.get("listCnt")
+                       or raw.get("resultData", {}).get("totalCount", 0))
+        items = (raw.get("list") or raw.get("resultList")
+                 or raw.get("resultData", {}).get("list")
+                 or raw.get("resultData", {}).get("rschList")
+                 or [])
+ 
+        if not items:
+            print(f"[PRISM] {page_no}p 항목 없음 → 종료", flush=True)
+            break
+ 
+        total_pages = -(-int(total_count) // 10) if total_count else page_no
+        target = total_pages if safe_max == 0 else min(safe_max, total_pages)
+        print(f"[PRISM] 리스트 API {page_no}/{target}p ({len(items)}건)", flush=True)
+ 
+        for item in items:
+            if stop_check():
+                break
+            # asmtId 키 탐색
+            asmt_id = (item.get("asmtId") or item.get("researchId")
+                       or item.get("taskId") or "")
+            title   = (item.get("asmtNm") or item.get("taskNm")
+                       or item.get("title") or "")
+            if not asmt_id:
+                continue
+ 
+            detail_url = f"{base_url}/homepage/asmt/{asmt_id}"
+            list_item  = {"view_id": asmt_id, "link_href": detail_url, "BI_SJ": title}
+            print(f"  {title[:30]} → {asmt_id}", flush=True)
+ 
+            if last_sig and is_list_item_past_last(list_item, last_sig):
+                last_data_reached = True
+                break
+ 
+            data.append(list_item)
+ 
+        if last_data_reached or page_no >= target:
+            break
+ 
+        page_no += 1
+ 
     return data, error_logs, last_data_reached
  
  
+# ── _parse_prism_detail: BeautifulSoup으로 상세 파싱 ─────────
+def _parse_prism_detail(html: str, list_title: str = "") -> dict:
+    """
+    PRISM 상세 HTML → 컬럼 dict.
+    th 텍스트로 다음 td를 찾는 방식 (하드코딩 없음).
+    """
+    if not html:
+        return {"ASG_NM": list_title}
+ 
+    soup = BeautifulSoup(html, "lxml")
+ 
+    def get_td(th_text: str) -> str:
+        th = soup.find("th", string=lambda t: t and th_text in t.strip())
+        if not th:
+            return ""
+        td = th.find_next_sibling("td")
+        return normalize_text(td.get_text(" ", strip=True)) if td else ""
+ 
+    # 연구기간 분리
+    rsrc_term = get_td("연구기간")
+    rsrc_from, rsrc_to = "", ""
+    if "~" in rsrc_term:
+        parts     = rsrc_term.split("~")
+        rsrc_from = normalize_text(parts[0])
+        rsrc_to   = normalize_text(parts[1]) if len(parts) > 1 else ""
+ 
+    # 발행년도 숫자만
+    m = re.search(r"\d{4}", get_td("발행년도"))
+    rsrc_year = m.group() if m else ""
+ 
+    return {
+        "ASG_NM":        get_td("과제명") or list_title,
+        "ASG_ORG_NM":    get_td("기관명"),
+        "ASG_DPRT":      get_td("관리부서"),
+        "ASG_PHONE":     get_td("전화번호"),
+        "ASG_RSRC_FROM": rsrc_from,
+        "ASG_RSRC_TO":   rsrc_to,
+        "ASG_RSRC_FD":   re.sub(r"\s*&gt;\s*|\s*>\s*", " > ", get_td("연구분야")).strip(" >"),
+        "RSRC_TITLE":    get_td("보고서명"),
+        "RSRC_CNTN":     get_td("목차"),
+        "RSRC_INFO":     get_td("초록"),
+        "RSRC_SBJ":      get_td("주제어"),
+        "RSRC_YEAR":     rsrc_year,
+        "CNT_PRF_ORG":   get_td("수행기관"),
+        "CNT_PRF_RSR":   get_td("수행연구원"),
+        "CNT_DATE":      get_td("계약일자"),
+        "CNT_MTHD":      get_td("계약방식"),
+        "CNT_AMT":       get_td("계약금액"),
+    }
+ 
+ 
 async def _get_prism_total_pages(page) -> int:
-    """
-    div.page-links 의 마지막 a.page-link 텍스트 = 총 페이지 수.
-    React SPA 방식: href="#", 텍스트가 숫자 = 페이지 번호.
-    """
+    """div.page-links 마지막 a.page-link 텍스트 = 총 페이지 수"""
     try:
         await page.wait_for_selector("div.page-links a.page-link", timeout=5000)
         links = await page.query_selector_all("div.page-links a.page-link")
-        if not links:
-            return 1
-        last = links[-1]
-        txt = clean_text(await last.inner_text())
-        if txt.isdigit():
-            return int(txt)
+        if links:
+            txt = clean_text(await links[-1].inner_text())
+            if txt.isdigit():
+                return int(txt)
     except Exception:
         pass
     return 1
@@ -1296,7 +1425,7 @@ async def _go_to_prism_page(page, page_no: int, timeout: int = 20000) -> bool:
     except Exception as e:
         print(f"[PRISM] 페이지 이동 실패 ({page_no}p): {e}", flush=True)
     return False
-
+ 
 _VIEWER_URL_PATTERNS = ["viewer","synap","htmlViewer","previewAjax","pdf.do","hwpViewer"]
 def _is_viewer_url(url: str) -> bool:
     return any(p in url for p in _VIEWER_URL_PATTERNS)
@@ -2463,141 +2592,126 @@ async def execute_policy_scraping_test(req: PolicyRequest):
 # ── prism 실행 엔진 ──────────────────────────────────────────────
 async def execute_prism_scraping(req: PrismRequest):
     app.state.stop_scraping = False
-    p = req.param
-    list_data, view_data, error_logs, field_logs = [], [], [], []
-    filepath = None
+    p        = req.param
     last_sig = _build_last_data_signature(req.last_data) if req.last_data else None
+    list_data, view_data, error_logs, field_logs = [], [], [], []
+    has_file = any(i.col in _PRISM_FILE_COLS for i in req.item)
+ 
     if last_sig:
         print(f"[PRISM] 추가수집 모드: {last_sig}", flush=True)
  
-    has_file_item = any(i.col in _PRISM_FILE_COLS for i in req.item)
+    # ── 1단계: 리스트 수집 ────────────────────────────────────
+    print(f"\n{'='*60}\n[PRISM] [1단계] 리스트: {p.list_url}", flush=True)
  
-    async with async_playwright() as playwright:
-        # ── 1단계: 리스트 수집 (PRISM 전용 클릭 방식) ────────────
-        print(f"\n{'='*60}\n[PRISM] [1단계] 리스트: {p.list_url}", flush=True)
-        browser = await playwright.chromium.launch(headless=True)
-        page    = await browser.new_page()
-        await page.set_extra_http_headers({"User-Agent": USER_AGENT})
-        try:
-            list_data, collect_errors, last_data_reached = await _collect_prism_list(
-                page,
-                list_url  = p.list_url,
-                max_pages = p.max_pages,
-                stop_check= lambda: app.state.stop_scraping,
-                last_sig  = last_sig,
-                timeout   = int(p.timeout),
-            )
-        except Exception as e:
-            print(f"[PRISM] 리스트 수집 에러: {e}", flush=True)
-            list_data, collect_errors, last_data_reached = [], [], False
-        finally:
-            await browser.close()
-            print("[PRISM] 1단계 브라우저 종료", flush=True)
+    if p.list_api_url:
+        # API 방식: Playwright 불필요
+        print(f"[PRISM] 리스트 API 방식: {p.list_api_url}", flush=True)
+        list_data, collect_errors, last_data_reached = await _fetch_prism_list_api(
+            p.list_url, p.list_api_url, p.max_pages,
+            lambda: app.state.stop_scraping, last_sig, int(p.timeout))
+    else:
+        # Playwright 클릭 방식
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            page    = await browser.new_page()
+            await page.set_extra_http_headers({"User-Agent": USER_AGENT})
+            try:
+                list_data, collect_errors, last_data_reached = await _collect_prism_list(
+                    page, p.list_url, None, p.max_pages,
+                    lambda: app.state.stop_scraping, last_sig, int(p.timeout))
+            except Exception as e:
+                print(f"[PRISM] 리스트 수집 에러: {e}", flush=True)
+                list_data, collect_errors, last_data_reached = [], [], False
+            finally:
+                await browser.close()
  
-        error_logs.extend(collect_errors)
-        if not list_data:
-            error_logs.append({"step": "1단계_리스트수집", "url": p.list_url,
-                                "selector": p.list_class, "error": "리스트 수집 결과 0건"})
+    print("[PRISM] 1단계 완료", flush=True)
+    error_logs.extend(collect_errors)
+    if not list_data:
+        error_logs.append({"step": "1단계_리스트수집", "url": p.list_url,
+                           "error": "리스트 수집 결과 0건"})
  
-        total = len(list_data)
-        print(f"\n[PRISM] [2단계] 상세 수집 ({total}건)\n{'-'*60}", flush=True)
-        detail_last_data_reached = False
+    total = len(list_data)
+    print(f"\n[PRISM] [2단계] 상세 수집 ({total}건)\n{'-'*60}", flush=True)
+    detail_last_data_reached = False
  
-        # ── 2단계: 상세 수집 ──────────────────────────────────────
-        # link_href 가 이미 상세 URL 이므로 _extract_bill_detail_html 바로 사용
-        browser = await playwright.chromium.launch(headless=True)
-        page    = await browser.new_page()
-        await page.set_extra_http_headers({"User-Agent": USER_AGENT})
-        try:
-            for idx, list_item in enumerate(list_data):
-                if app.state.stop_scraping:
-                    print(f"[PRISM] 중단 요청: {idx}번째", flush=True); break
+    # ── 2단계: 상세 수집 (Playwright로 detail HTML + 첨부파일) ──
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
  
-                vid        = list_item.get("view_id")
-                target_url = list_item.get("link_href", "")
-                if not vid or not target_url:
-                    continue
+        for idx, list_item in enumerate(list_data):
+            if app.state.stop_scraping:
+                print(f"[PRISM] 중단: {idx}번째", flush=True); break
  
-                print(f"[PRISM] 상세 ({idx+1}/{total}) ID: {vid}", flush=True)
+            vid        = list_item.get("view_id")
+            target_url = list_item.get("link_href", "")
+            list_title = list_item.get("BI_SJ", "")
+            if not vid:
+                continue
+ 
+            print(f"[PRISM] 상세 ({idx+1}/{total}) ID: {vid}", flush=True)
+            try:
+                seq_id = f"CLIKC{str(time.time_ns())[:16]}"
+                year   = str(datetime.now().year)
+ 
+                # Playwright로 상세 페이지 접근 → DOM 렌더링 대기 → HTML 추출
+                page = await browser.new_page()
+                await page.set_extra_http_headers({"User-Agent": USER_AGENT})
                 try:
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=int(p.timeout))
+                    await page.goto(target_url, wait_until="domcontentloaded",
+                                    timeout=int(p.timeout))
                     try:
-                        # "과제명" th 다음 td에 텍스트가 생길 때까지 대기
-                        await page.wait_for_function(
-                            """() => {
-                                const tds = document.querySelectorAll('table.tstyle_write td');
-                                return Array.from(tds).some(td => td.textContent.trim().length > 0);
-                            }""",
-                            timeout=int(p.timeout)
-                        )
+                        await page.wait_for_selector("div.file_list", timeout=int(p.timeout))
                     except Exception:
                         await page.wait_for_timeout(5000)
-
-                    el = await page.query_selector("div.contents_area")
-                    detail_html = await el.inner_html() if el else await page.content()
-                    
-                    # ── 임시 디버그 ──
-                    print(f"[DEBUG] detail_html 길이: {len(detail_html)}", flush=True)
-                    print(f"[DEBUG] 과제명 포함: {'과제명' in detail_html}", flush=True)
-                    print(f"[DEBUG] 앞 500자:\n{detail_html[:500]}", flush=True)
-                    parsed_u   = urlparse(target_url)
-                    base_url   = f"{parsed_u.scheme}://{parsed_u.netloc}"
-                    seq_id     = f"CLIKC{str(time.time_ns())[:16]}"
-                    list_title = list_item.get("BI_SJ", "")
  
-                    detail = parse_detail_by_items(detail_html, req.item, list_title=list_title)
-                    year   = (detail.get("RSRC_YEAR") or detail.get("REG_DATE") or "")[:4] \
-                             or str(datetime.now().year)
+                    el          = await page.query_selector("div.contents_area")
+                    detail_html = await el.inner_html() if el else ""
+                    detail      = _parse_prism_detail(detail_html, list_title=list_title)
+                    year        = detail.get("RSRC_YEAR") or year
  
-                    if has_file_item:
+                    # 첨부파일
+                    file_result = {}
+                    if has_file and detail_html:
+                        parsed_u = urlparse(target_url)
+                        base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
                         try:
                             file_result = await _extract_prism_attachments(
-                                page, p.view_class, base_url, req, seq_id, year, items=req.item)
+                                page, "div.contents_area", base_url, req,
+                                seq_id, year, items=req.item)
                         except Exception as e:
-                            print(f"    [!] 첨부파일 수집 실패: {str(e)[:100]}", flush=True)
-                            file_result = {}
-                            try:
-                                await page.goto(target_url, wait_until="domcontentloaded",
-                                                timeout=int(p.timeout))
-                            except Exception:
-                                pass
-                        detail.update({
-                            "ORG_FILE_NM": file_result.get("ORG_FILE_NM", ""),
-                            "SYS_FILE_NM": file_result.get("SYS_FILE_NM", ""),
-                            "FILE_SEQ":    file_result.get("FILE_SEQ",    ""),
-                            "RPRT_TYPE":   file_result.get("RPRT_TYPE",   ""),
-                        })
+                            print(f"    [!] 첨부파일 실패: {str(e)[:100]}", flush=True)
+                finally:
+                    await page.close()
  
-                    collected_item = {
-                        "view_id": vid,
-                        "URL":     target_url,
-                        "SEQ":     seq_id,
-                        **detail,
-                    }
+                detail.update({
+                    "ORG_FILE_NM": file_result.get("ORG_FILE_NM", ""),
+                    "SYS_FILE_NM": file_result.get("SYS_FILE_NM", ""),
+                    "FILE_SEQ":    file_result.get("FILE_SEQ",    ""),
+                    "RPRT_TYPE":   file_result.get("RPRT_TYPE",   ""),
+                })
  
-                    field_logs.append(
-                        audit_fields(vid, target_url, seq_id, collected_item, req.item))
+                collected_item = {
+                    "view_id": vid, "URL": target_url,
+                    "SEQ": seq_id, "BBS_ID": req.bbs_id, **detail,
+                }
+                field_logs.append(audit_fields(vid, target_url, seq_id,
+                                               collected_item, req.item))
  
-                    if last_sig and not detail_last_data_reached \
-                            and is_last_data_match(collected_item, last_sig):
-                        detail_last_data_reached = True
-                        print("[PRISM] 상세 기준점 도달", flush=True); break
+                if last_sig and not detail_last_data_reached \
+                        and is_last_data_match(collected_item, last_sig):
+                    detail_last_data_reached = True
+                    print("[PRISM] 상세 기준점 도달", flush=True); break
  
-                    view_data.append(collected_item)
+                view_data.append(collected_item)
  
-                except Exception as e:
-                    print(f"    [!] ID: {vid} 실패: {e}", flush=True)
-                    view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
-                    error_logs.append({"step": "2단계_상세수집", "view_id": vid,
-                                       "url": target_url, "error": str(e)})
+            except Exception as e:
+                print(f"    [!] ID: {vid} 실패: {e}", flush=True)
+                view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
+                error_logs.append({"step": "2단계_상세수집", "view_id": vid,
+                                   "url": target_url, "error": str(e)})
  
-        except Exception as e:
-            print(f"\n[PRISM] 상세 수집 전체 에러: {e}", flush=True)
-            return {"req_id": req.req_id, "type": req.type,
-                    "crw_id": req.crw_id, "file_dir": req.file_dir,
-                    "ok": False, "error_msg": str(e)}
-        finally:
-            await browser.close()
+        await browser.close()
  
     is_interrupted = app.state.stop_scraping or last_data_reached or detail_last_data_reached
     result_block   = _build_result(view_data, error_logs, is_interrupted)
@@ -2610,9 +2724,9 @@ async def execute_prism_scraping(req: PrismRequest):
  
     view_data.reverse()
     full_payload = {
-        "reqId":   req.req_id, "type":    req.type,
-        "crwId":   req.crw_id, "fileDir": req.file_dir,
-        "result":  result_block, "data": view_data, "log": error_logs,
+        "reqId": req.req_id, "type": req.type, "crwId": req.crw_id,
+        "fileDir": req.file_dir, "result": result_block,
+        "data": view_data, "log": error_logs,
     }
  
     domain = extract_domain(p.list_url)
@@ -2625,83 +2739,93 @@ async def execute_prism_scraping(req: PrismRequest):
  
     await _do_send(INSERT_API_URL, full_payload)
     return {
-        "req_id":            req.req_id,  "type":      req.type,
-        "crw_id":            req.crw_id,  "file_dir":  req.file_dir,
-        "ok":                True,        "interrupted": is_interrupted,
+        "req_id": req.req_id, "type": req.type,
+        "crw_id": req.crw_id, "file_dir": req.file_dir,
+        "ok": True, "interrupted": is_interrupted,
         "last_data_reached": last_data_reached or detail_last_data_reached,
-        "data_count":        len(view_data), "saved_file": filepath,
+        "data_count": len(view_data), "saved_file": filepath,
     }
  
  
 async def execute_prism_scraping_test(req: PrismRequest):
-    """1페이지 1건만 수집하는 테스트 모드"""
+    """1건만 수집하는 테스트 모드"""
     p         = req.param
     view_data = []
-    has_file_item = any(i.col in _PRISM_FILE_COLS for i in req.item)
  
-    async with async_playwright() as playwright:
-        browser, page = await _setup_browser(playwright)
-        try:
-            print(f"[PRISM TEST] 리스트: {p.list_url}", flush=True)
- 
-            # 1건만 수집
-            list_data, _, _ = await _collect_prism_list(
-                page, list_url=p.list_url, max_pages="1",
-                timeout=int(p.timeout))
- 
-            if not list_data:
-                return {"req_id": req.req_id, "type": req.type,
-                        "crw_id": req.crw_id, "file_dir": req.file_dir, "data": []}
- 
-            item       = list_data[0]
-            vid        = item.get("view_id")
-            target_url = item.get("link_href", "")
-            if not vid:
-                return {"req_id": req.req_id, "type": req.type,
-                        "crw_id": req.crw_id, "file_dir": req.file_dir, "data": []}
- 
-            print(f"[PRISM TEST] 상세: {vid}", flush=True)
+    # 1단계: 리스트 1건
+    if p.list_api_url:
+        list_data, _, _ = await _fetch_prism_list_api(
+            p.list_url, p.list_api_url, "1", timeout=int(p.timeout))
+    else:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            page    = await browser.new_page()
+            await page.set_extra_http_headers({"User-Agent": USER_AGENT})
             try:
-                detail_html = await _extract_bill_detail_html(
-                    page, p.view_class, target_url, timeout=int(p.timeout))
-                parsed_u   = urlparse(target_url)
-                base_url   = f"{parsed_u.scheme}://{parsed_u.netloc}"
-                seq_id     = f"CLIKC{str(time.time_ns())[:16]}"
- 
-                detail = parse_detail_by_items(detail_html, req.item, list_title=item.get("BI_SJ",""))
-                year   = (detail.get("RSRC_YEAR") or detail.get("REG_DATE") or "")[:4] \
-                         or str(datetime.now().year)
- 
-                if has_file_item:
-                    try:
-                        file_result = await _extract_prism_attachments(
-                            page, p.view_class, base_url, req, seq_id, year, items=req.item)
-                    except Exception as e:
-                        print(f"    [!] 첨부파일 실패: {str(e)[:100]}", flush=True)
-                        file_result = {}
-                    detail.update({
-                        "ORG_FILE_NM": file_result.get("ORG_FILE_NM", ""),
-                        "SYS_FILE_NM": file_result.get("SYS_FILE_NM", ""),
-                        "FILE_SEQ":    file_result.get("FILE_SEQ",    ""),
-                        "RPRT_TYPE":   file_result.get("RPRT_TYPE",   ""),
-                    })
- 
-                view_data.append({
-                    "view_id": vid, "URL": target_url,
-                    "SEQ": seq_id, **detail,
-                })
- 
+                list_data, _, _ = await _collect_prism_list(
+                    page, p.list_url, None, "1", timeout=int(p.timeout))
             except Exception as e:
-                view_data.append({"view_id": vid, "URL": target_url, "view_error": str(e)})
+                print(f"[PRISM TEST] 에러: {e}", flush=True)
+                list_data = []
+            finally:
+                await browser.close()
  
-        except Exception as e:
-            print(f"[PRISM TEST] 에러: {e}", flush=True)
+    if not list_data:
+        return {"req_id": req.req_id, "type": req.type,
+                "crw_id": req.crw_id, "file_dir": req.file_dir, "data": []}
+ 
+    item       = list_data[0]
+    vid        = item.get("view_id")
+    target_url = item.get("link_href", "")
+ 
+    # 2단계: 상세 1건
+    seq_id = f"CLIKC{str(time.time_ns())[:16]}"
+    year   = str(datetime.now().year)
+ 
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page    = await browser.new_page()
+        await page.set_extra_http_headers({"User-Agent": USER_AGENT})
+        try:
+            await page.goto(target_url, wait_until="domcontentloaded",
+                            timeout=int(p.timeout))
+            try:
+                await page.wait_for_selector("div.file_list", timeout=int(p.timeout))
+            except Exception:
+                await page.wait_for_timeout(5000)
+ 
+            el          = await page.query_selector("div.contents_area")
+            detail_html = await el.inner_html() if el else ""
+            detail      = _parse_prism_detail(detail_html)
+            year        = detail.get("RSRC_YEAR") or year
+ 
+            file_result = {}
+            if any(i.col in _PRISM_FILE_COLS for i in req.item) and detail_html:
+                parsed_u = urlparse(target_url)
+                base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
+                try:
+                    file_result = await _extract_prism_attachments(
+                        page, "div.contents_area", base_url, req,
+                        seq_id, year, items=req.item)
+                except Exception as e:
+                    print(f"    [!] 첨부파일 실패: {str(e)[:100]}", flush=True)
         finally:
             await browser.close()
  
+    detail.update({
+        "ORG_FILE_NM": file_result.get("ORG_FILE_NM", ""),
+        "SYS_FILE_NM": file_result.get("SYS_FILE_NM", ""),
+        "FILE_SEQ":    file_result.get("FILE_SEQ",    ""),
+        "RPRT_TYPE":   file_result.get("RPRT_TYPE",   ""),
+    })
+    view_data.append({
+        "view_id": vid, "URL": target_url,
+        "SEQ": seq_id, "BBS_ID": req.bbs_id, **detail,
+    })
     view_data.reverse()
     return {"req_id": req.req_id, "type": req.type,
             "crw_id": req.crw_id, "file_dir": req.file_dir, "data": view_data}
+ 
 
 # ── 공통 전송 ─────────────────────────────────────────────────────
 async def _do_send(target_url, payload):
