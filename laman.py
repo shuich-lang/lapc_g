@@ -72,12 +72,14 @@ class RegexItem(BaseModel):
 	regex: list[str] = Field(..., description="상세 HTML에서 추출할 정규식")
 	xpath: list[str] = Field(None, description="(미구현) XPath 추출용 필드")
 	removeTags: str = Field("Y", description="HTML 태그 제거 여부: Y | N")
+	value: Optional[str] = Field(None, description="고정값. regex 있으면 무시하고 그냥 value에 있는거 넣어줄거임")
 
 
 class LamanCrawlRequest(BaseModel):
-	req_id: str = Field(...)
-	crw_id: Optional[str] = Field(None)
-	type: str = Field(...)
+	req_id: str = Field(..., description="날짜 포맷: yyyyMMddHHmmssSSSSSS")
+	crw_id: str = Field(..., description="기관 코드")
+	bbs_id: str = Field(..., description="게시판 ID")
+	type: str = Field(..., description="수집 유형: minutes, bill 등")
 	file_dir: str = Field(...)
 	param: LamanParam = Field(...)
 	item: list[RegexItem] = Field(default_factory=list)
@@ -464,13 +466,23 @@ def parse_laman_detail_by_dynamic_regex(
 		if not key:
 			continue
 
-		# PHOTO_FILE_URL은 handle_photo_reserved_col에서 별도 처리
-		if key == RESERVED_COL_PHOTO:
+		# value가 지정되어 있으면 고정값으로 사용 (regex 무시)
+		if item.value is not None and normalize_text(item.value):
+			result[key] = normalize_text(item.value)
 			continue
 
+		# 정규식이 비어있으면 건너뜀 (CMS에서 전체 컬럼을 보내는 경우 대응)
+		if not item.regex or all(not normalize_text(r) for r in item.regex):
+			continue
+
+		# regex 목록 중 "list_title" 예약어 체크
 		if len(item.regex) == 1 and normalize_text(item.regex[0]).lower() == "list_title":
 			value = normalize_text(list_title)
 			result[key] = value or None
+			continue
+
+		# PHOTO_FILE_URL은 handle_photo_reserved_col에서 별도 처리
+		if key == RESERVED_COL_PHOTO:
 			continue
 
 		raw_value = apply_regex_raw(detail_html, item.regex)
