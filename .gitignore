@@ -21,3 +21,6 @@ clikr-collection/
 # OS
 .DS_Store
 Thumbs.db
+
+field_logs/
+logs/
