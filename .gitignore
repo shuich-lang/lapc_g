@@ -12,6 +12,13 @@ env/
 
 # 다운로드 데이터 (크롤링 결과물)
 attachment/
+clikr-collection/
+# 에디터
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
 
 # 요청 파일
 requests/
@@ -19,13 +26,6 @@ requests/
 # 로그 파일
 logs/
 field_logs/
-
-# 에디터
-.vscode/
-
-# OS
-.DS_Store
-Thumbs.db
 
 # test json
 result.json

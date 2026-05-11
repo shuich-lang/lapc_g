@@ -2,6 +2,8 @@ import json
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError, BaseModel
+from minutes import app as minutes_app
+from minutes import run_minutes_all_and_callback  # 회의록 실행 함수
 
 # ── bill.py 주석 처리 ─────────────────────────────────────────────
 # from bill import (
@@ -19,6 +21,12 @@ from crawler import (
     _route_request,
     execute_bill_scraping,
     execute_bill_scraping_test,
+    PolicyRequest,
+    execute_policy_scraping,
+    execute_policy_scraping_test,
+    PrismRequest,
+    execute_prism_scraping,
+    execute_prism_scraping_test,
 )
 
 from minutes import (
@@ -35,12 +43,6 @@ from five_mins_free_spch import (
     crawl_spch_regex_check,
     build_spch_callback_payload,
     run_spch_all_and_callback,
-)
-from policy import (
-    app as policy_app,
-    PolicyRequest,
-    execute_policy_scraping,
-    execute_policy_scraping_test as policy_test,
 )
 from laman import (
     app as laman_app,
@@ -92,6 +94,14 @@ async def run_policy_job(req_obj):
     except Exception:
         await set_job_failed(req_obj.req_id)
 
+async def run_prism_job(req_obj):
+    try:
+        await set_job_running(req_obj.req_id)
+        await execute_prism_scraping(req_obj)
+        await set_job_done(req_obj.req_id)
+    except Exception:
+        await set_job_failed(req_obj.req_id)
+
 async def run_laman_job(req_obj):
     try:
         await set_job_running(req_obj.req_id)
@@ -99,7 +109,6 @@ async def run_laman_job(req_obj):
         await set_job_done(req_obj.req_id)
     except Exception:
         await set_job_failed(req_obj.req_id)
-
 
 def handle_validation_error(e: ValidationError):
     errors = e.errors()
@@ -135,21 +144,29 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             req_obj = _route_request(raw)          # ScrapeRequest 반환
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_bill_job, req_obj)
+
         elif "minutes" in req_type:
             raw = CrawlRequest(**json_data)
             req_obj = parse_crawl_request(raw)
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_minutes_job, req_obj)
 
+        elif req_type == "policy":
+            raw = UnifiedRequest(**json_data)
+            req_obj = _route_request(raw)
+            await create_job(req_obj.req_id)
+            background_tasks.add_task(run_policy_job, req_obj)
+
         elif "free5min" in req_type:
             req_obj = SpchCrawlRequest(**json_data)
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_spch_job, req_obj)
 
-        elif "policy" in req_type:
-            req_obj = PolicyRequest(**json_data)
+        elif req_type == "prism":
+            raw = UnifiedRequest(**json_data)
+            req_obj = _route_request(raw)
             await create_job(req_obj.req_id)
-            background_tasks.add_task(run_policy_job, req_obj)
+            background_tasks.add_task(run_prism_job, req_obj)
 
         elif "laman" in req_type:
             req_obj = LamanCrawlRequest(**json_data)
@@ -187,19 +204,15 @@ async def integrated_crawl_test_api(request: Request):
         return JSONResponse(status_code=200, content={"ok": False, "message": "[type] 파라미터는 필수입니다."})
 
     try:
-        # if req_type == "bill":
-        #     req_obj = ScrapeRequest(**json_data)
-        #     return await bill_test(req_obj)
-        
         if req_type == "bill":
             raw = UnifiedRequest(**json_data)
             req_obj = _route_request(raw)
             return await execute_bill_scraping_test(req_obj)
 
-        # elif req_type == "laman":
-        #     raw = UnifiedRequest(**json_data)
-        #     req_obj = _route_request(raw)
-        #     return await execute_laman_scraping(req_obj)
+        elif req_type == "policy":
+            raw = UnifiedRequest(**json_data)
+            req_obj = _route_request(raw)
+            return await execute_policy_scraping_test(req_obj)
 
         elif req_type == "minutes":
             raw = CrawlRequest(**json_data)
@@ -211,10 +224,11 @@ async def integrated_crawl_test_api(request: Request):
             req_obj = SpchCrawlRequest(**json_data)
             crawl_response = await crawl_spch_regex_check(req_obj, crawl_all=False)
             return build_spch_callback_payload(req_obj, crawl_response)
-
-        elif req_type == "policy":
-            req_obj = PolicyRequest(**json_data)
-            return await policy_test(req_obj)
+        
+        elif req_type == "prism":
+            raw = UnifiedRequest(**json_data)
+            req_obj = _route_request(raw)
+            return await execute_prism_scraping_test(req_obj)
         
         elif req_type == "laman":
             req_obj = LamanCrawlRequest(**json_data)
@@ -254,14 +268,8 @@ async def integrated_crawl_stop():
     # ── bill / laman 중단 (crawler.py 공유 state) ─────────────────
     if not crawler_app.state.stop_scraping:
         crawler_app.state.stop_scraping = True
-        stopped.append("bill/laman")
-        print("[!] [bill/laman] stop_scraping = True", flush=True)
-
-    # ── policy 중단 ───────────────────────────────────────────────
-    if getattr(policy_app.state, "current_stop_event", None):
-        policy_app.state.current_stop_event.set()
-        stopped.append("policy")
-        print("[!] [policy] stop_event.set()", flush=True)
+        stopped.append("bill/laman/policy/prism")
+        print("[!] stop_scraping = True", flush=True)
 
     if stopped:
         return {"ok": True, "stopped": stopped, "message": f"{stopped} 중단 요청 완료. 현재 수집 건 완료 후 중단됩니다."}
