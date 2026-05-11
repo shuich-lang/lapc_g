@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import asyncio
 import re
+import time
 from typing import Optional
 from urllib.parse import (
 	urljoin,
@@ -43,7 +44,10 @@ USER_AGENT = (
 CALLBACK_INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"			# 도커 내에서 cms 컨테이너 접근용
 # CALLBACK_INSERT_API_URL = "http://localhost:8900/insert_api"				# python 내 json 저장
 # CALLBACK_INSERT_API_URL = "http://localhost:9000/insert_api.do"			# 로컬 cms
-# CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"			# 운영 cms
+# CALLBACK_INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"		# 운영 cms
+
+IMAGE_EXTENSIONS = ("jpg", "jpeg", "png", "gif", "webp", "bmp", "svg")
+RESERVED_COL_PHOTO = "PHOTO_FILE_URL"
 
 FIELD_LOGS_DIR = "field_logs"
 
@@ -52,7 +56,7 @@ FIELD_LOGS_DIR = "field_logs"
 # =========================
 
 
-class SpchParam(BaseModel):
+class LamanParam(BaseModel):
 	list_url: HttpUrl = Field(...)
 	list_root_selector: str = Field(...)
 	item_selector: str = Field(...)
@@ -60,7 +64,7 @@ class SpchParam(BaseModel):
 	ssl_mode: str = Field("Y")
 	max_pages: int = Field(500)
 	skip_top_count: int = Field(0, description="상단 게시물 패스 수 (고정 공지글 방어용)")
-	is_multi_spch: str = Field("N", description="한 목록 당다건 추출이면 Y, 단건 추출이면 N")
+	profile_selector: str = Field(..., description="2뎁스 프로필 상세 보기 버튼 명시용")
 
 
 class RegexItem(BaseModel):
@@ -70,16 +74,16 @@ class RegexItem(BaseModel):
 	removeTags: str = Field("Y", description="HTML 태그 제거 여부: Y | N")
 
 
-class SpchCrawlRequest(BaseModel):
-	req_id: str = Field(..., description="날짜 포맷: yyyyMMddHHmmssSSSSSS")
-	crw_id: str = Field(..., description="기관 코드")
-	bbs_id: str = Field(..., description="게시판 ID")
-	type: str = Field(..., description="수집 유형: minutes, bill 등")
-	param: SpchParam = Field(..., description="크롤링 파라미터")
+class LamanCrawlRequest(BaseModel):
+	req_id: str = Field(...)
+	crw_id: Optional[str] = Field(None)
+	type: str = Field(...)
+	file_dir: str = Field(...)
+	param: LamanParam = Field(...)
 	item: list[RegexItem] = Field(default_factory=list)
 
 
-class SpchItem(BaseModel):
+class LamanItem(BaseModel):
 	rank: int
 	list_title: str
 
@@ -91,16 +95,17 @@ class SpchItem(BaseModel):
 	fields: dict[str, Optional[str]] = Field(default_factory=dict)
 
 	uid: Optional[str] = None
+	asemby_cn: Optional[str] = None
 
 	raw_href: Optional[str] = None
 	raw_onclick: Optional[str] = None
 	note: Optional[str] = None
 
 
-class SpchCrawlResponse(BaseModel):
+class LamanCrawlResponse(BaseModel):
 	list_url: str
 	item_count: int
-	items: list[SpchItem]
+	items: list[LamanItem]
 
 
 # =========================
@@ -321,8 +326,8 @@ def replace_query_param(url: str, param_name: str, param_value: str) -> str:
 	))
 
 
-def audit_fields_minutes(
-	mints_cn: str,
+def audit_fields_laman(
+	asemby_cn: str,
 	url: Optional[str],
 	item_cols: list[str],
 	fields: dict[str, Optional[str]],
@@ -336,7 +341,7 @@ def audit_fields_minutes(
 			missing.append(col)
 
 	return {
-		"mints_cn":  mints_cn,
+		"asemby_cn":  asemby_cn,
 		"URL":       url,
 		"collected": collected,
 		"empty":     [],
@@ -435,6 +440,7 @@ def extract_list_candidates(
 			"href": href or None,
 			"onclick": onclick or None,
 			"row_text": row_text,
+			"row_html": str(item),
 		})
 
 	if limit is None:
@@ -446,9 +452,9 @@ def extract_list_candidates(
 # Dynamic regex detail parsing
 # =========================
 
-def parse_spch_detail_by_dynamic_regex(
+def parse_laman_detail_by_dynamic_regex(
 	detail_html: str,
-	request: SpchCrawlRequest,
+	request: LamanCrawlRequest,
 	list_title: Optional[str] = None,
 ) -> dict[str, Optional[str]]:
 	result: dict[str, Optional[str]] = {}
@@ -456,6 +462,10 @@ def parse_spch_detail_by_dynamic_regex(
 	for item in request.item:
 		key = normalize_text(item.col)
 		if not key:
+			continue
+
+		# PHOTO_FILE_URL은 handle_photo_reserved_col에서 별도 처리
+		if key == RESERVED_COL_PHOTO:
 			continue
 
 		if len(item.regex) == 1 and normalize_text(item.regex[0]).lower() == "list_title":
@@ -471,77 +481,6 @@ def parse_spch_detail_by_dynamic_regex(
 			result[key] = normalize_text(raw_value)
 
 	return result
-
-
-def parse_spch_detail_multi(
-	detail_html: str,
-	request: SpchCrawlRequest,
-	list_title: Optional[str] = None,
-) -> list[dict[str, Optional[str]]]:
-	"""multi_speech 모드: 각 RegexItem을 findall → 인덱스 매칭으로 N건 생성."""
-	columns: dict[str, Optional[list[Optional[str]]]] = {}
-	max_count = 0
-
-	for item in request.item:
-		key = normalize_text(item.col)
-		if not key:
-			continue
-
-		if len(item.regex) == 1 and normalize_text(item.regex[0]).lower() == "list_title":
-			columns[key] = None
-			continue
-
-		raw_values = apply_regex_all(detail_html, item.regex)
-
-		if item.removeTags == "Y":
-			columns[key] = [strip_html_tags(v) for v in raw_values]
-		else:
-			columns[key] = [normalize_text(v) for v in raw_values]
-
-		max_count = max(max_count, len(columns[key]))
-
-	if max_count == 0:
-		return []
-
-	for key, values in columns.items():
-		if values is None:
-			columns[key] = [normalize_text(list_title)] * max_count
-		elif len(values) == 1 and max_count > 1:
-			columns[key] = values * max_count
-		elif len(values) < max_count:
-			columns[key] = values + [None] * (max_count - len(values))
-
-	return [
-		{key: vals[i] for key, vals in columns.items()}
-		for i in range(max_count)
-	]
-
-
-# 제목 + 날짜 + 이름 동일할 경우 spch_content 병합 (시간 초과로 마이크 꺼짐 방어용)
-def merge_spch_rows(
-	rows: list[dict[str, Optional[str]]],
-	key_cols: tuple[str, ...] = ("SPCH_MEN", "SPCH_TITLE", "SPCH_DATE"),
-	merge_col: str = "SPCH_CONTENT",
-) -> list[dict[str, Optional[str]]]:
-	"""동일 의원+제목+날짜인 행을 합쳐서 SPCH_CONTENT를 이어붙인다."""
-	if not rows:
-		return rows
-	merged: list[dict[str, Optional[str]]] = []
-	for row in rows:
-		key = tuple(row.get(c) for c in key_cols)
-		found = None
-		for prev in merged:
-			prev_key = tuple(prev.get(c) for c in key_cols)
-			if prev_key == key:
-				found = prev
-				break
-		if found is not None:
-			prev_content = found.get(merge_col) or ""
-			cur_content = row.get(merge_col) or ""
-			found[merge_col] = prev_content + cur_content
-		else:
-			merged.append(dict(row))
-	return merged
 
 
 # =========================
@@ -607,7 +546,7 @@ def extract_link_paging_info(html: str, list_url: str) -> tuple[Optional[str], l
 
 async def fetch_pages_by_playwright_click(
 	url: str,
-	request: SpchCrawlRequest,
+	request: LamanCrawlRequest,
 ) -> list[tuple[str, str]]:
 	pages = []
 	seen_signatures = set()
@@ -735,7 +674,7 @@ async def fetch_list_html_by_playwright(url: str, ssl_mode: str) -> str:
 
 
 async def build_list_pages(
-	request: SpchCrawlRequest,
+	request: LamanCrawlRequest,
 	crawl_all: bool,
 ) -> list[tuple[str, str]]:
 	list_url = str(request.param.list_url)
@@ -761,7 +700,7 @@ async def build_list_pages(
 
 	use_playwright = False
 	if not has_list_items(first_html):
-		print(f"[SPCH] httpx 목록 조회 결과 항목 없음 → Playwright 폴백 시도")
+		print(f"[LAMAN] httpx 목록 조회 결과 항목 없음 → Playwright 폴백 시도")
 		try:
 			first_html = await fetch_list_html_by_playwright(
 				list_url, 
@@ -769,9 +708,9 @@ async def build_list_pages(
 			)
 			use_playwright = True
 			if not has_list_items(first_html):
-				print(f"[SPCH] Playwright 목록 조회에서도 항목 없음")
+				print(f"[LAMAN] Playwright 목록 조회에서도 항목 없음")
 		except Exception as e:
-			print(f"[SPCH] Playwright 목록 조회 실패: {e}")
+			print(f"[LAMAN] Playwright 목록 조회 실패: {e}")
 
 	def make_page_signature(html: str) -> str:
 		candidates = extract_list_candidates(
@@ -841,7 +780,7 @@ async def build_list_pages(
 			current_html = next_html
 			continue
 			
-		print("[SPCH] 일반 페이징 실패 → Playwright fallback")
+		print("[LAMAN] 일반 페이징 실패 → Playwright fallback")
 
 		pw_pages = await fetch_pages_by_playwright_click(
 			list_url,
@@ -1025,17 +964,103 @@ async def open_detail_page(
 	return detail_url, method, open_type, detail_html, merged_note
 
 
+async def open_profile_page_by_selector(
+	homepage_url: str,
+	homepage_html: str,
+	profile_selector: str,
+	ssl_mode: str,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+	"""의원 홈페이지 HTML에서 profile_selector로 프로필 링크를 찾아 접근.
+	1순위: href가 유효한 URL이면 httpx로 직접 접근
+	2순위: href가 없거나 javascript이면 Playwright 클릭
+	Returns: (profile_url, profile_html, note)
+	"""
+	soup = BeautifulSoup(homepage_html, "lxml")
+
+	# 셀렉터로 프로필 링크 요소 탐색
+	target = safe_select_one(soup, profile_selector)
+	if not target:
+		return None, None, f"profile_selector 요소를 찾지 못했습니다: {profile_selector}"
+
+	href = normalize_text(target.get("href"))
+
+	# 1순위: httpx 직접 접근
+	if href and not is_javascript_href(href) and is_http_like_href(href):
+		profile_url = urljoin(homepage_url, href)
+		try:
+			profile_html = await fetch_html(profile_url, ssl_mode)
+			return profile_url, profile_html, None
+		except Exception as exc:
+			# httpx 실패 시 Playwright 폴백
+			pass
+
+	# 2순위: Playwright 클릭
+	try:
+		async with async_playwright() as p:
+			browser = await p.chromium.launch(headless=True)
+			context = await browser.new_context(
+				user_agent=USER_AGENT,
+				ignore_https_errors=(ssl_mode == "N"),
+			)
+			page = await context.new_page()
+			await page.goto(homepage_url, wait_until="domcontentloaded", timeout=30000)
+			await page.wait_for_timeout(1000)
+
+			btn = page.locator(profile_selector).first
+			if await btn.count() == 0:
+				await browser.close()
+				return None, None, f"Playwright에서 profile_selector 요소를 찾지 못했습니다: {profile_selector}"
+
+			original_url = page.url
+
+			try:
+				async with page.expect_popup(timeout=5000) as popup_info:
+					await btn.click()
+				popup = await popup_info.value
+				try:
+					await popup.wait_for_load_state("networkidle", timeout=10000)
+				except PlaywrightTimeoutError:
+					pass
+				profile_url = popup.url
+				profile_html = await popup.content()
+				await popup.close()
+				await browser.close()
+				return profile_url, profile_html, None
+			except PlaywrightTimeoutError:
+				pass
+
+			# same page 이동
+			try:
+				await page.wait_for_load_state("domcontentloaded", timeout=10000)
+				await page.wait_for_load_state("networkidle", timeout=5000)
+			except PlaywrightTimeoutError:
+				pass
+
+			if page.url and page.url != original_url:
+				profile_url = page.url
+				profile_html = await page.content()
+				await browser.close()
+				return profile_url, profile_html, None
+
+			profile_html = await page.content()
+			await browser.close()
+			return page.url, profile_html, "URL 변경 없이 콘텐츠 변경 감지 시도"
+
+	except Exception as exc:
+		return None, None, f"프로필 페이지 접근 실패: {type(exc).__name__}: {str(exc)}"
+
+
 # =========================
 # Shared builders
 # =========================
 
-async def build_spch_item_by_dynamic_regex(
-	request: SpchCrawlRequest,
+async def build_laman_item_by_dynamic_regex(
+	request: LamanCrawlRequest,
 	list_page_url: str,
 	candidate: dict,
 	rank_index_in_page: int,
 	final_rank: int,
-) -> SpchItem:
+) -> LamanItem:
 	title = candidate["title"]
 	href = candidate["href"]
 	onclick = candidate["onclick"]
@@ -1054,7 +1079,7 @@ async def build_spch_item_by_dynamic_regex(
 	uid = extract_uid(detail_url)
 
 	if not detail_html:
-		return SpchItem(
+		return LamanItem(
 			rank=final_rank,
 			list_title=title,
 			detail_url=detail_url,
@@ -1068,13 +1093,13 @@ async def build_spch_item_by_dynamic_regex(
 			note=note or "상세 view 접근 실패",
 		)
 
-	parsed = parse_spch_detail_by_dynamic_regex(
+	parsed = parse_laman_detail_by_dynamic_regex(
 		detail_html=detail_html,
 		request=request,
 		list_title=title,
 	)
 
-	return SpchItem(
+	return LamanItem(
 		rank=final_rank,
 		list_title=title,
 		detail_url=detail_url,
@@ -1090,56 +1115,203 @@ async def build_spch_item_by_dynamic_regex(
 
 
 # =========================
+# Image Download
+# =========================
+
+def build_image_save_path(
+	file_dir: str,
+	crw_id: str,
+	asemby_cn: str,
+	original_filename: str,
+) -> str:
+	"""프로필 이미지 저장 경로: /{file_dir}/{crw_id}/{currentYear}/{ASEMBY_CN}.{확장자}"""
+	ext = ""
+	if original_filename and "." in original_filename:
+		ext = original_filename.rsplit(".", 1)[-1].lower().split("?")[0]
+
+	if ext not in IMAGE_EXTENSIONS:
+		ext = "jpg"
+
+	year = datetime.now().strftime("%Y")
+	filename = f"{asemby_cn}.{ext}"
+
+	return os.path.join(
+		file_dir,
+		crw_id,
+		year,
+		filename,
+	)
+
+
+async def download_profile_image(
+	img_url: str,
+	file_dir: str,
+	crw_id: str,
+	asemby_cn: str,
+	ssl_mode: str,
+) -> tuple[str, str]:
+	"""프로필 이미지 다운로드. (save_path, file_name) 반환"""
+	print(f"[PHOTO] 다운로드 시작: {img_url}")
+
+	timeout = httpx.Timeout(30.0, connect=10.0)
+	headers = {"User-Agent": USER_AGENT}
+	verify_option = get_verify_options(ssl_mode)
+
+	async with httpx.AsyncClient(
+		headers=headers,
+		timeout=timeout,
+		follow_redirects=True,
+		verify=verify_option,
+	) as client:
+		response = await client.get(img_url)
+		response.raise_for_status()
+
+		# URL에서 파일명 추출
+		url_path = urlparse(img_url).path
+		if url_path:
+			original_name = os.path.basename(url_path)
+		else:
+			raise ValueError(f"이미지 URL에서 파일명을 추출할 수 없습니다. url: {img_url}")
+
+		save_path = build_image_save_path(
+			file_dir=file_dir,
+			crw_id=crw_id,
+			asemby_cn=asemby_cn,
+			original_filename=original_name,
+		)
+
+		os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+		if os.path.exists(save_path):
+			print(f"[PHOTO] 이미 존재하는 파일 스킵: {save_path}")
+			return save_path, original_name
+
+		with open(save_path, "wb") as f:
+			f.write(response.content)
+
+		print(f"[PHOTO] 다운로드 성공: {original_name} -> {save_path} ({len(response.content)} bytes)")
+
+	return save_path, original_name
+
+
+def extract_photo_url_from_html(
+	html: str,
+	regex_patterns: list[str],
+	base_url: str,
+) -> Optional[str]:
+	"""HTML에서 프로필 이미지 URL 추출. 정규식 매칭 후 절대 URL로 변환."""
+	raw_value = apply_regex_raw(html, regex_patterns)
+	if not raw_value:
+		return None
+
+	raw_value = normalize_text(raw_value)
+	if not raw_value:
+		return None
+
+	return urljoin(base_url, raw_value)
+
+
+async def handle_photo_reserved_col(
+	request: LamanCrawlRequest,
+	parsed: dict,
+	list_item_html: str,
+	detail_html: Optional[str],
+	list_url: str,
+	detail_url: Optional[str],
+	asemby_cn: str,
+	error_logs: list[dict],
+	title: str,
+) -> None:
+	"""PHOTO_FILE_URL 예약어 처리: 목록 우선 → 상세 폴백으로 이미지 추출 및 다운로드"""
+	photo_item = None
+	for item in request.item:
+		if normalize_text(item.col) == RESERVED_COL_PHOTO:
+			photo_item = item
+			break
+
+	if not photo_item:
+		return
+
+	if not photo_item.regex or all(not normalize_text(r) for r in photo_item.regex):
+		return
+
+	# 1순위: 목록 HTML에서 시도
+	photo_url = extract_photo_url_from_html(
+		html=list_item_html,
+		regex_patterns=photo_item.regex,
+		base_url=list_url,
+	)
+
+	# 2순위: 상세 HTML에서 시도
+	if not photo_url and detail_html:
+		photo_url = extract_photo_url_from_html(
+			html=detail_html,
+			regex_patterns=photo_item.regex,
+			base_url=detail_url or list_url,
+		)
+
+	if not photo_url:
+		parsed[RESERVED_COL_PHOTO] = None
+		parsed["PHOTO_FILE_NM"] = None
+		parsed["PHOTO_FILE_PATH"] = None
+		return
+
+	try:
+		save_path, file_name = await download_profile_image(
+			img_url=photo_url,
+			file_dir=request.file_dir if hasattr(request, 'file_dir') else "",
+			crw_id=request.crw_id,
+			asemby_cn=asemby_cn,
+			ssl_mode=request.param.ssl_mode,
+		)
+		parsed[RESERVED_COL_PHOTO] = photo_url
+		parsed["PHOTO_FILE_NM"] = file_name
+		parsed["PHOTO_FILE_PATH"] = save_path
+	except Exception as exc:
+		parsed[RESERVED_COL_PHOTO] = photo_url
+		parsed["PHOTO_FILE_NM"] = None
+		parsed["PHOTO_FILE_PATH"] = None
+		error_logs.append({
+			"step": "프로필 이미지 다운로드",
+			"title": title,
+			"photo_url": photo_url,
+			"error": f"{type(exc).__name__}: {str(exc)}",
+		})
+
+
+# =========================
 # Callback
 # =========================
 
-def make_row_dedupe_key(row: dict) -> str:
-	title = normalize_text(row.get("SPCH_TITLE"))
-	date = normalize_text(row.get("SPCH_DATE"))
-	men = normalize_text(row.get("SPCH_MEN"))
-	content_head = normalize_text(row.get("SPCH_CONTENT"))[:50]
-
-	return f"{title}|{date}|{men}|{content_head}"
-
-
-def build_spch_callback_payload(
-	request: SpchCrawlRequest,
-	crawl_response: SpchCrawlResponse,
+def build_laman_callback_payload(
+	request: LamanCrawlRequest,
+	crawl_response: LamanCrawlResponse,
 	error_logs: list | None = None,
 	error: str = "",
 ) -> dict:
 	data = []
-	seen_row_keys = set()
 	_error_logs = error_logs or []
 	
 	for item in crawl_response.items:
 		if item.fields:
 			row = dict(item.fields)
-			row["url"] = item.detail_url
-
-			dedupe_key = make_row_dedupe_key(row)
-			if dedupe_key in seen_row_keys:
-				print(f"[SPCH] 중복 발견 skip - dedupe_key: {dedupe_key}")
-				continue
-
-			seen_row_keys.add(dedupe_key)
-			data.reverse()  # 뒤집어서 앞에 추가 (최신이 앞에 오도록)
+			row["HMPG"] = item.detail_url
+			row["ASEMBY_CN"] = item.asemby_cn
 			data.append(row)
 
 	result_block = _build_result(data, _error_logs, error=error)
 
 	return {
 		"req_id": request.req_id,
-		"crw_id": request.crw_id,
-		"bbs_id": request.bbs_id,
 		"type": request.type,
+		"crw_id": request.crw_id,
 		"result": result_block,
 		"data": data,
 		"log": _error_logs
 	}
 
 
-async def post_spch_callback(payload: dict) -> None:
+async def post_laman_callback(payload: dict) -> None:
 	timeout = httpx.Timeout(60.0, connect=10.0)
 	async with httpx.AsyncClient(timeout=timeout) as client:
 		response = await client.post(
@@ -1150,32 +1322,32 @@ async def post_spch_callback(payload: dict) -> None:
 		response.raise_for_status()
 
 
-async def run_spch_all_and_callback(request: SpchCrawlRequest) -> None:
+async def run_laman_all_and_callback(request: LamanCrawlRequest) -> None:
 	error_logs: list[dict] = []
-	crawl_response: Optional[SpchCrawlRequest] = None
+	crawl_response: Optional[LamanCrawlRequest] = None
 
 	try:
-		crawl_response = await crawl_spch_regex_check(request, crawl_all=True, error_logs=error_logs)
-		payload = build_spch_callback_payload(request, crawl_response, error_logs=error_logs)
+		crawl_response = await crawl_laman_regex_check(request, crawl_all=True, error_logs=error_logs)
+		payload = build_laman_callback_payload(request, crawl_response, error_logs=error_logs)
 	except Exception as exc:
 		traceback.print_exc()
 	
 		if crawl_response is None:
-			crawl_response = SpchCrawlRequest(
+			crawl_response = LamanCrawlRequest(
 				list_url=str(request.param.list_url),
 				item_count=0,
 				items=[],
 			)
 		error_logs.append({
-			"step": "run_spch_all_and_callback",
+			"step": "run_laman_all_and_callback",
 			"error": f"{type(exc).__name__}: {str(exc)}",
 		})
-		payload = build_spch_callback_payload(
+		payload = build_laman_callback_payload(
 			request, crawl_response, error_logs=error_logs, error=str(exc)
 		)
 	
 	try:
-		await post_spch_callback(payload)
+		await post_laman_callback(payload)
 	except Exception as cb_exc:
 		print(f"[CALLBACK] 콜백 전송 실패: {cb_exc}")
 		traceback.print_exc()
@@ -1185,11 +1357,11 @@ async def run_spch_all_and_callback(request: SpchCrawlRequest) -> None:
 # Main crawl service
 # =========================
 
-async def crawl_spch_regex_check(
-	request: SpchCrawlRequest,
+async def crawl_laman_regex_check(
+	request: LamanCrawlRequest,
 	crawl_all: bool = False,
 	error_logs: list[dict] | None = None,
-) -> SpchCrawlResponse:
+) -> LamanCrawlResponse:
 	if error_logs is None:
 		error_logs = []
 
@@ -1198,7 +1370,7 @@ async def crawl_spch_regex_check(
 			"step": "파라미터 검증",
 			"error": "item은 최소 1개 이상이어야 합니다.",
 		})
-		return SpchCrawlResponse(
+		return LamanCrawlResponse(
 			list_url=str(request.param.list_url),
 			item_count=0,
 			items=[]
@@ -1212,13 +1384,12 @@ async def crawl_spch_regex_check(
 			"url": str(request.param.list_url),
 			"error": f"{type(exc).__name__}: {str(exc)}",
 		})
-		return SpchCrawlResponse(
+		return LamanCrawlResponse(
 			list_url=str(request.param.list_url),
 			item_count=0,
 			items=[],
 		)
 
-	is_multi = request.param.is_multi_spch == "Y"
 	field_logs: list[dict] = []
 	item_cols: list[str] = [
 		normalize_text(ri.col)
@@ -1226,12 +1397,11 @@ async def crawl_spch_regex_check(
 		if normalize_text(ri.col)
 		and ri.regex and any(normalize_text(r) for r in ri.regex)
 	]
-	all_items: list[SpchItem] = []
+	all_items: list[LamanItem] = []
 	seen_keys: set[str] = set()
-	visited_urls: set[str] = set()
 
 	for page_idx, (page_url, page_html) in enumerate(list_pages, start=1):
-		print(f"[SPCH] ===== {page_idx} 페이지 처리 중 ===== URL: {page_url}")
+		print(f"[LAMAN] ===== {page_idx} 페이지 처리 중 ===== URL: {page_url}")
 
 		candidates = extract_list_candidates(
 			html=page_html,
@@ -1253,7 +1423,7 @@ async def crawl_spch_regex_check(
 		for idx, candidate in enumerate(candidates, start=1):
 			try:
 				current_rank = idx
-				print(f"[SPCH] 현재 문서 색인 중: {current_rank}번째 | 제목: {candidate.get('title')}")
+				print(f"[LAMAN] 현재 문서 색인 중: {current_rank}번째 | 제목: {candidate.get('title')}")
 
 				# --- 상세 페이지 접근 ---
 				title = candidate["title"]
@@ -1271,17 +1441,10 @@ async def crawl_spch_regex_check(
 					ssl_mode=request.param.ssl_mode,
 				)
 
-				# -- 다건 item: 이미 방문한 url은 skip
-				if is_multi and detail_url and detail_url in visited_urls:
-					print(f"[SPCH] multi 모드 - 이미 방문한 URL skip: {detail_url}")
-					continue
-				if is_multi and detail_url:
-					visited_urls.add(detail_url)
-
 				uid = extract_uid(detail_url)
 
 				if not detail_html:
-					items = [SpchItem(
+					items = [LamanItem(
 						rank=current_rank,
 						list_title=title,
 						detail_url=detail_url,
@@ -1294,67 +1457,67 @@ async def crawl_spch_regex_check(
 						raw_onclick=onclick,
 						note=note or "상세 view 접근 실패",
 					)]
-				elif is_multi:
-					parsed_list = parse_spch_detail_multi(
-						detail_html=detail_html,
-						request=request,
-						list_title=title,
-					)
-					parsed_list = merge_spch_rows(parsed_list)
-					if not parsed_list:
-						print(f"[SPCH] 문서 {idx}번째 | multi 모드이나 매치 결과 없음")
-						items = [SpchItem(
-							rank=current_rank,
-							list_title=title,
-							detail_url=detail_url,
-							access_method=access_method,
-							open_type=open_type,
-							detail_access_success=True,
-							fields={},
-							uid=uid,
-							raw_href=href,
-							raw_onclick=onclick,
-							note=(note or "") + " | multi 모드이나 매치 결과 없음",
-						)]
-					else:
-						for speech_idx, parsed in enumerate(parsed_list, start=1):
-							speaker_name = parsed.get("SPCH_MEN") or "의원명 없음"
-							print(f"[SPCH] 문서 {idx}번째 | 발언 {speech_idx} 수집 성공 ({speaker_name} 의원)")
-
-						items = [
-							SpchItem(
-								rank=current_rank + i,
-								list_title=title,
-								detail_url=detail_url,
-								access_method=access_method,
-								open_type=open_type,
-								detail_access_success=True,
-								fields=parsed,
-								uid=uid,
-								raw_href=href,
-								raw_onclick=onclick,
-								note=note,
-							)
-							for i, parsed in enumerate(parsed_list)
-						]
 				else:
-					parsed = parse_spch_detail_by_dynamic_regex(
-						detail_html=detail_html,
+					asemby_cn = "CLIKM" + str(time.time_ns())
+					asemby_cn = asemby_cn[:21]
+
+					# ── 2뎁스: profile_selector가 있으면 프로필 상세 페이지 추가 접근 ──
+					final_html = detail_html
+					final_url = detail_url
+					depth2_note = None
+
+					if request.param.profile_selector:
+						profile_url, profile_html, profile_note = await open_profile_page_by_selector(
+							homepage_url=detail_url or page_url,
+							homepage_html=detail_html,
+							profile_selector=request.param.profile_selector,
+							ssl_mode=request.param.ssl_mode,
+						)
+						if profile_html:
+							final_html = profile_html
+							final_url = profile_url or detail_url
+							print(f"[LAMAN] 2뎁스 프로필 페이지 접근 성공: {final_url}")
+						else:
+							depth2_note = profile_note or "프로필 상세 페이지 접근 실패"
+							error_logs.append({
+								"step": f"프로필_2뎁스_{page_idx}p_{idx}",
+								"title": title,
+								"homepage_url": detail_url,
+								"error": depth2_note,
+							})
+
+					parsed = parse_laman_detail_by_dynamic_regex(
+						detail_html=final_html,
 						request=request,
 						list_title=title,
 					)
-					items = [SpchItem(
+					await handle_photo_reserved_col(
+						request=request,
+						parsed=parsed,
+						list_item_html=str(candidate.get("row_html", "")),
+						detail_html=final_html,
+						list_url=page_url,
+						detail_url=final_url,
+						asemby_cn=asemby_cn,
+						error_logs=error_logs,
+						title=title,
+					)
+
+					merged_note = " / ".join(filter(None, [note, depth2_note])) or None
+
+					items = [LamanItem(
 						rank=current_rank,
 						list_title=title,
-						detail_url=detail_url,
+						detail_url=final_url,
 						access_method=access_method,
 						open_type=open_type,
 						detail_access_success=True,
 						fields=parsed,
 						uid=uid,
+						asemby_cn=asemby_cn,
 						raw_href=href,
 						raw_onclick=onclick,
-						note=note,
+						note=merged_note,
 					)]
 
 			except ValueError as exc:
@@ -1363,7 +1526,7 @@ async def crawl_spch_regex_check(
 					"title": candidate.get("title", ""),
 					"error": str(exc),
 				})
-				items = [SpchItem(
+				items = [LamanItem(
 					rank=len(all_items) + 1,
 					list_title=candidate["title"],
 					detail_url=None,
@@ -1382,7 +1545,7 @@ async def crawl_spch_regex_check(
 					"title": candidate.get("title", ""),
 					"error": str(exc),
 				})
-				items = [SpchItem(
+				items = [LamanItem(
 					rank=len(all_items) + 1,
 					list_title=candidate["title"],
 					detail_url=None,
@@ -1397,20 +1560,15 @@ async def crawl_spch_regex_check(
 				)]
 
 			for item in items:
-				if is_multi:
-					# multi: 같은 URL이라도 발언 내용이 다르면 별개 건
-					field_sig = "|".join(str(v) for v in item.fields.values() if v)
-					dedupe_key = f"{item.detail_url}|{field_sig}"
-				else:
-					dedupe_key = item.uid or item.detail_url or f"{item.list_title}|{item.raw_href}|{item.raw_onclick}"
+				dedupe_key = item.uid or item.detail_url or f"{item.list_title}|{item.raw_href}|{item.raw_onclick}"
 				if crawl_all and dedupe_key in seen_keys:
 					continue
 				seen_keys.add(dedupe_key)
 				
 				# ── 필드 감사 로그 ──
 				if item.detail_access_success and item.fields:
-					field_logs.append(audit_fields_minutes(
-						mints_cn=item.uid or "",
+					field_logs.append(audit_fields_laman(
+						asemby_cn=item.uid or "",
 						url=item.detail_url,
 						item_cols=item_cols,
 						fields=item.fields,
@@ -1431,7 +1589,7 @@ async def crawl_spch_regex_check(
 	if field_logs:
 		save_field_logs(field_logs, request)
 
-	return SpchCrawlResponse(
+	return LamanCrawlResponse(
 		list_url=str(request.param.list_url),
 		item_count=len(all_items),
 		items=all_items,

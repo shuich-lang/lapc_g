@@ -1,0 +1,304 @@
+{
+    "field_logs": [
+        {
+            "mints_cn": "CLIKR1778472963935956",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7779.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472964604878",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7784.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472965513895",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7780.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472966012135",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7777.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472966416947",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7776.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472966989657",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7768.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472967692393",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7771.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472968691720",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7775.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472969834073",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7767.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472970929866",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7774.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472971464333",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7766.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472972729954",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7772.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472973683523",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7770.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472975275013",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7773.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472975714611",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7769.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472975901147",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7764.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472976163038",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7763.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472976982281",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7762.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472977139961",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7781.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "mints_cn": "CLIKR1778472977856476",
+            "URL": "http://www.gncl.go.kr:8080/viewer/minutes/7734.do",
+            "collected": [
+                "INQUIRY_NM",
+                "MINTS_HTML",
+                "MTG_DE",
+                "MTG_NM",
+                "MTR_SJ",
+                "ODR_NM",
+                "RASMBLY_SESN"
+            ],
+            "empty": [],
+            "missing": []
+        }
+    ]
+}

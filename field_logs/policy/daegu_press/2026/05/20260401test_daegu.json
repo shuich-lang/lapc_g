@@ -1,0 +1,324 @@
+{
+    "field_logs": [
+        {
+            "view_id": "1184B984803BB9C0DB1C3FD6BE8C4A85",
+            "BI_CN": "CLIKC1778472144112627",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=1184B984803BB9C0DB1C3FD6BE8C4A85&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "7FF61A5FF8A5CA899CAC284BDE3F7E26",
+            "BI_CN": "CLIKC1778472145313869",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=7FF61A5FF8A5CA899CAC284BDE3F7E26&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "CD33852C513F674F5883E20AD044C469",
+            "BI_CN": "CLIKC1778472146544592",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=CD33852C513F674F5883E20AD044C469&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "668A09AB241E21CDA17C53B37ED6B685",
+            "BI_CN": "CLIKC1778472147762133",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=668A09AB241E21CDA17C53B37ED6B685&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "A3F970E3FDD9AE4AB959873D5F7CE254",
+            "BI_CN": "CLIKC1778472148821221",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=A3F970E3FDD9AE4AB959873D5F7CE254&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "3C5FD94C8CBCE76BAF4518ADB27E2BCA",
+            "BI_CN": "CLIKC1778472150162413",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=3C5FD94C8CBCE76BAF4518ADB27E2BCA&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "45263793A8D79831EF469FF340DBE44B",
+            "BI_CN": "CLIKC1778472151374635",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=45263793A8D79831EF469FF340DBE44B&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "ABB1CE9FFB6B2F14BBE89BB94C1CC151",
+            "BI_CN": "CLIKC1778472152785773",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=ABB1CE9FFB6B2F14BBE89BB94C1CC151&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "77542152247B7DB05E65D7465D01146F",
+            "BI_CN": "CLIKC1778472154630332",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=77542152247B7DB05E65D7465D01146F&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "9BC133887FD28704ABDDFC842ECB834E",
+            "BI_CN": "CLIKC1778472155884775",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=9BC133887FD28704ABDDFC842ECB834E&obtain=no&page=&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "8EB95FB1343607340502161DD91DBC1A",
+            "BI_CN": "CLIKC1778472157103765",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=8EB95FB1343607340502161DD91DBC1A&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "515BB1F01B37323D2FE0D684F9CA6D62",
+            "BI_CN": "CLIKC1778472158535816",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=515BB1F01B37323D2FE0D684F9CA6D62&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "9DC91707B55A8555C2EE11D70D9FAA8A",
+            "BI_CN": "CLIKC1778472159777860",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=9DC91707B55A8555C2EE11D70D9FAA8A&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "0E48FCE00AD305A3EE61E1779AE1C625",
+            "BI_CN": "CLIKC1778472161083493",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=0E48FCE00AD305A3EE61E1779AE1C625&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "33755ADA634BFC96653F130E743C0529",
+            "BI_CN": "CLIKC1778472162774761",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=33755ADA634BFC96653F130E743C0529&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "362E604A6660239719428AAA3DF994A4",
+            "BI_CN": "CLIKC1778472164431670",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=362E604A6660239719428AAA3DF994A4&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "801EF96377276EE2D94D098F917E35C6",
+            "BI_CN": "CLIKC1778472165716941",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=801EF96377276EE2D94D098F917E35C6&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "B46294F2C1449560B412BE0CB852CAA6",
+            "BI_CN": "CLIKC1778472166910392",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=B46294F2C1449560B412BE0CB852CAA6&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "D3C18A56CE269F6B4B87462FB2F61601",
+            "BI_CN": "CLIKC1778472168102898",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=D3C18A56CE269F6B4B87462FB2F61601&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        },
+        {
+            "view_id": "471664B21406B8591B93E755A49BB080",
+            "BI_CN": "CLIKC1778472169389101",
+            "URL": "https://council.daegu.go.kr/publicity/bbs?reform=view&uid=471664B21406B8591B93E755A49BB080&obtain=no&page=2&flag=&keyword=&search_code=&th_sch=&bbs_id=bodo&list_style=&process_sch=&sdate=&edate=",
+            "collected": [
+                "CDATE",
+                "CONTENT",
+                "DOWNURL",
+                "EXTRACTHTML",
+                "ORG_FILE_NM",
+                "TITLE",
+                "WRITER"
+            ],
+            "empty": [],
+            "missing": []
+        }
+    ]
+}
