@@ -19,8 +19,8 @@ app.state.stop_scraping = False
 
 DOWNLOAD_DIR, FILE_DOWNLOAD_DIR, FIELD_LOGS_DIR = "download", "attachment", "field_logs"
 #INSERT_API_URL = "http://10.201.38.157:8080/insert_api.do"
-#INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"
-INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"	
+INSERT_API_URL = "http://172.17.0.1:18123/insert_api.do"
+#INSERT_API_URL = "http://211.219.26.15:18123/insert_api.do"	
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
 BLOCKED_RESOURCES     = {"image", "stylesheet", "media", "font"}
@@ -33,7 +33,7 @@ _FILE_SKIP_COLS   = {"BI_FILE_NM", "BI_FILE_URL", "BI_FILE_PATH", "BI_FILE_ID"}
 _LAST_DATA_MATCH_KEYS = ["URL", "BI_SJ", "BI_CN", "BI_NO"]
 _POLICY_FILE_COLS = {"ORG_FILE_NM", "DOWNPATH", "DOWNID", "DOWNURL"}
 MAX_FILE_SIZE_BYTES   = 20 * 1024 * 1024   # 20MB
-_PRISM_FILE_COLS  = {"ORG_FILE_NM", "SYS_FILE_NM", "FILE_SEQ", "RPRT_TYPE"}
+_PRISM_FILE_COLS  = {"ORIGNL_FILE_NM", "SYS_FILE_NM", "FILE_SEQ", "RPRT_TYPE"}
 
 # ── BI_NO / RASMBLY_NUMPR_SESN 파서 ──────────────────────────────
 _P_BI_NO_SESN        = re.compile(r'^(.+?)\s*[\(\（]제\s*(\d+)\s*회[\)\）]')
@@ -1215,7 +1215,7 @@ async def _extract_prism_attachments(page, view_class, base_url, req, seq_id, ye
         if is_private:
             print(f"[*] [PRISM] 비공개 스킵: {hint_name}", flush=True)
             seq += 1
-            attachments.append({"org_file_nm": hint_name, "sys_file_nm": "",
+            attachments.append({"orignl_file_nm": hint_name, "sys_file_nm": "",
                                  "file_seq": str(seq), "rprt_type": _prism_rprt_type(hint_name)})
             continue
         print(f"[*] [PRISM] 다운로드 시도: {hint_name}", flush=True)
@@ -1247,14 +1247,14 @@ async def _extract_prism_attachments(page, view_class, base_url, req, seq_id, ye
             seq += 1; resolved_name = hint_name or f"file_{seq}"; rprt_type = _prism_rprt_type(resolved_name)
             try: await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000); await page.wait_for_timeout(300)
             except Exception: pass
-        attachments.append({"org_file_nm": resolved_name, "sys_file_nm": save_path,
+        attachments.append({"orignl_file_nm": resolved_name, "sys_file_nm": save_path,
                              "file_seq": str(seq), "rprt_type": rprt_type})
     return _pack_prism_attachment_result(attachments) if attachments else {}
 
 def _pack_prism_attachment_result(attachments: list) -> dict:
     def one_or_json(lst): return lst[0] if len(lst)==1 else json.dumps(lst, ensure_ascii=False)
     return {
-        "ORG_FILE_NM": one_or_json([a["org_file_nm"] for a in attachments]),
+        "ORIGNL_FILE_NM": one_or_json([a["orignl_file_nm"] for a in attachments]),
         "SYS_FILE_NM": one_or_json([a["sys_file_nm"] for a in attachments]),
         "FILE_SEQ":    one_or_json([a["file_seq"]    for a in attachments]),
         "RPRT_TYPE":   one_or_json([a["rprt_type"]   for a in attachments]),
@@ -1636,7 +1636,6 @@ async def execute_prism_scraping(req: PrismRequest):
     p        = req.param
     last_sig = _build_last_data_signature(req.last_data) if req.last_data else None
     list_data, view_data, error_logs, field_logs = [], [], [], []
-    has_file = any(i.col in _PRISM_FILE_COLS for i in req.item)
     if last_sig: print(f"[PRISM] 추가수집 모드: {last_sig}", flush=True)
 
     print(f"\n{'='*60}\n[PRISM] [1단계] 리스트: {p.list_url}", flush=True)
@@ -1689,7 +1688,7 @@ async def execute_prism_scraping(req: PrismRequest):
                     detail      = _parse_prism_detail(detail_html, list_title=list_title)
                     year        = detail.get("RSRC_YEAR") or year
                     file_result = {}
-                    if has_file and detail_html:
+                    if detail_html:
                         parsed_u = urlparse(target_url); base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
                         try:
                             file_result = await _extract_prism_attachments(
@@ -1697,7 +1696,7 @@ async def execute_prism_scraping(req: PrismRequest):
                         except Exception as e:
                             print(f"    [!] 첨부파일 실패: {str(e)[:100]}", flush=True)
                 finally: await page.close()
-                detail.update({k: file_result.get(k,"") for k in ("ORG_FILE_NM","SYS_FILE_NM","FILE_SEQ","RPRT_TYPE")})
+                detail.update({k: file_result.get(k,"") for k in ("ORIGNL_FILE_NM","SYS_FILE_NM","FILE_SEQ","RPRT_TYPE")})
                 collected_item = {"view_id":vid,"URL":target_url,"SEQ":seq_id,"BBS_ID":req.bbs_id,**detail}
                 field_logs.append(audit_fields(vid, target_url, seq_id, collected_item, req.item))
                 if last_sig and not detail_last_data_reached and is_last_data_match(collected_item, last_sig):
@@ -1766,7 +1765,7 @@ async def execute_prism_scraping_test(req: PrismRequest):
             detail      = _parse_prism_detail(detail_html)
             year        = detail.get("RSRC_YEAR") or year
             file_result = {}
-            if any(i.col in _PRISM_FILE_COLS for i in req.item) and detail_html:
+            if detail_html:
                 parsed_u = urlparse(target_url); base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
                 try:
                     file_result = await _extract_prism_attachments(
@@ -1775,7 +1774,7 @@ async def execute_prism_scraping_test(req: PrismRequest):
                     print(f"    [!] 첨부파일 실패: {str(e)[:100]}", flush=True)
         finally: await browser.close()
 
-    detail.update({k: file_result.get(k,"") for k in ("ORG_FILE_NM","SYS_FILE_NM","FILE_SEQ","RPRT_TYPE")})
+    detail.update({k: file_result.get(k,"") for k in ("ORIGNL_FILE_NM","SYS_FILE_NM","FILE_SEQ","RPRT_TYPE")})
     view_data.append({"view_id":vid,"URL":target_url,"SEQ":seq_id,"BBS_ID":req.bbs_id,**detail})
     view_data.reverse()
     return {"req_id":req.req_id,"type":req.type,"crw_id":req.crw_id,"file_dir":req.file_dir,"data":view_data}
