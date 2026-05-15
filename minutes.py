@@ -78,7 +78,7 @@ class RegexItem(BaseModel):
 class CrawlRequest(BaseModel):
 	req_id: str = Field(..., description="날짜 포맷: yyyyMMddHHmmssSSSSSS")
 	crw_id: str = Field(..., description="기관 코드")
-	bbs_id: str = Field(..., description="게시판 ID")
+	bbs_id: Optional[str] = Field(None, description="게시판 ID")
 	type: str = Field(..., description="수집 유형: minutes, bill 등")
 	last_data: Optional[dict[str, Optional[str]]] = Field(None, description="현재까지 수집된 가장 최근의 데이터. 추가수집 시 들어오는 값.")
 	file_dir: str = Field("", description="파일 저장 절대 경로")
@@ -89,7 +89,7 @@ class CrawlRequest(BaseModel):
 class RegexCrawlRequest(BaseModel):
 	req_id: str = Field(..., description="날짜 포맷: yyyyMMddHHmmssSSSSSS")
 	crw_id: str = Field(..., description="기관 코드")
-	bbs_id: str = Field(..., description="게시판 ID")
+	bbs_id: Optional[str] = Field(None, description="게시판 ID")
 	type: str = Field(..., description="수집 유형: minutes, bill 등")
 	last_data: Optional[dict[str, Optional[str]]] = Field(None, description="현재까지 수집된 가장 최근의 데이터. 추가수집 시 들어오는 값.")
 	file_dir: str = Field("", description="파일 저장 절대 경로")
