@@ -51,6 +51,12 @@ from laman import (
     build_laman_callback_payload,
     run_laman_all_and_callback,
 )
+from old_minutes import (
+    OldMinutesCrawlRequest,
+    run_old_minutes_and_callback,
+    build_old_minutes_callback_payload,
+    crawl_old_minutes,
+)
 from crawl_status import create_job, get_job, set_job_running, set_job_done, set_job_failed
 
 router = APIRouter()
@@ -110,6 +116,15 @@ async def run_laman_job(req_obj):
     except Exception:
         await set_job_failed(req_obj.req_id)
 
+async def run_old_minutes_job(req_obj):
+    try:
+        await set_job_running(req_obj.req_id)
+        await run_old_minutes_and_callback(req_obj)
+        await set_job_done(req_obj.req_id)
+    except Exception:
+        await set_job_failed(req_obj.req_id)
+
+
 def handle_validation_error(e: ValidationError):
     errors = e.errors()
     first_err = errors[0]
@@ -144,6 +159,11 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             req_obj = _route_request(raw)          # ScrapeRequest 반환
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_bill_job, req_obj)
+        
+        elif "old_minutes" in req_type:
+            req_obj = OldMinutesCrawlRequest(**json_data)
+            await create_job(req_obj.req_id)
+            background_tasks.add_task(run_old_minutes_job, req_obj)
 
         elif "minutes" in req_type:
             raw = CrawlRequest(**json_data)
@@ -172,7 +192,6 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             req_obj = LamanCrawlRequest(**json_data)
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_laman_job, req_obj)
-
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type: {req_type}"})
@@ -234,6 +253,12 @@ async def integrated_crawl_test_api(request: Request):
             req_obj = LamanCrawlRequest(**json_data)
             crawl_response = await crawl_laman_regex_check(req_obj, crawl_all=False)
             return build_laman_callback_payload(req_obj, crawl_response)
+        
+        elif req_type == "old_minutes":
+            req_obj = OldMinutesCrawlRequest(**json_data)
+            error_logs = []
+            items = await crawl_old_minutes(req_obj, error_logs)
+            return build_old_minutes_callback_payload(req_obj, items, error_logs)
 
         else:
             return JSONResponse(status_code=200, content={"ok": False, "message": f"지원하지 않는 type: {req_type}"})
