@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sys
 import asyncio
 import re
@@ -1615,6 +1616,13 @@ async def crawl_minutes_regex_check(
 ) -> CrawlResponse:
 	if error_logs is None:
 		error_logs = []
+
+	# ── crw_id 기반 커스텀 분기 ──
+	try:
+		mod = importlib.import_module(f"custom_minutes.{request.crw_id}")
+		return await mod.crawl_minutes(request, crawl_all=crawl_all, error_logs=error_logs)
+	except ModuleNotFoundError:
+		pass
 	
 	if not request.item:
 		error_logs.append({
