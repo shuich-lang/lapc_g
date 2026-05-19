@@ -637,7 +637,7 @@ async def crawl_old_minutes(
 	base_url = str(request.param.base_url).rstrip("/")
 	viewer_path = request.param.viewer_path
 	tree_type = request.param.tree_type
-	max_items = 70 if request.test == "Y" else 0  # 0 = 무제한
+	max_items = 10 if request.test == "Y" else 0  # 0 = 무제한
 
 	leaves = await _collect_all_leaves(request, error_logs)
 	if not leaves:
@@ -672,6 +672,17 @@ async def crawl_old_minutes(
 			gen_match = re.search(r"(\d+)", leaf.generation)
 			if gen_match:
 				parsed["RASMBLY_NUMPR"] = gen_match.group(1)
+
+			sesn_match = re.search(r"제\s*(\d+)\s*회", leaf.session_name)
+			if sesn_match:
+				parsed["RASMBLY_SESN"] = sesn_match.group(1)
+
+			if leaf.meeting_order:
+				parsed["ODR_NM"] = leaf.meeting_order
+			elif leaf.title:
+				odr_match = re.search(r"(개회식|폐회식|부록\d*|제\s*\d+\s*차)", leaf.title)
+				if odr_match:
+					parsed["ODR_NM"] = odr_match.group(1)
 
 			# 파일명 추출
 			from urllib.parse import urlparse, unquote
@@ -765,6 +776,19 @@ async def crawl_old_minutes(
 			gen_match = re.search(r"(\d+)", leaf.generation)
 			if gen_match:
 				parsed["RASMBLY_NUMPR"] = gen_match.group(1)
+
+		if not parsed.get("RASMBLY_SESN"):
+			sesn_match = re.search(r"제\s*(\d+)\s*회", leaf.session_name)
+			if sesn_match:
+				parsed["RASMBLY_SESN"] = sesn_match.group(1)
+
+		if not parsed.get("ODR_NM"):
+			if leaf.meeting_order:
+				parsed["ODR_NM"] = leaf.meeting_order
+			elif leaf.title:
+				odr_match = re.search(r"(개회식|폐회식|부록\d*|제\s*\d+\s*차)", leaf.title)
+				if odr_match:
+					parsed["ODR_NM"] = odr_match.group(1)
 
 		# ── 첨부파일 다운로드 (기존 로직 동일) ──
 		file_value = parsed.pop("ORGINL_FILE_URL", None)
