@@ -891,7 +891,7 @@ def build_old_minutes_callback_payload(
 
 	return {
 		"req_id": request.req_id,
-		"type": request.type,
+		"type": "minutes",
 		"crw_id": request.crw_id,
 		"bbs_id": request.bbs_id,
 		"result": result_block,
