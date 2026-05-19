@@ -112,11 +112,14 @@ async def crawl_minutes(
 
     session_pairs = _build_session_numbers(daesoo_list)
 
-    # 추가수집/테스트면 최신 대수만
-    if not crawl_all:
-        if daesoo_list:
-            latest = daesoo_list[0]
-            session_pairs = [(latest["daesoo"], s) for s in range(latest["e_num"], latest["s_num"] - 1, -1)]
+    # 추가수집이면 최신 대수만 (last_data 매칭 시 중단)
+    # 테스트(crawl_all=False)면 최신 대수만
+    if is_additional or not crawl_all:
+        latest = daesoo_list[0]
+        session_pairs = [
+            (latest["daesoo"], s)
+            for s in range(latest["e_num"], latest["s_num"] - 1, -1)
+        ]
 
     item_cols = [
         normalize_text(ri.col)
