@@ -1783,18 +1783,18 @@ async def execute_prism_scraping_test(req: PrismRequest):
 def _route_request(raw: UnifiedRequest):
     extra     = raw.model_extra or {}
     last_data = LastData(**raw.last_data) if raw.last_data else None
-    if raw.type == "prism":
+    if "prism" in raw.type:
         return PrismRequest(req_id=raw.req_id, type=raw.type, crw_id=raw.crw_id,
                             file_dir=raw.file_dir, bbs_id=extra.get("bbs_id","0"),
                             param=PrismParam(**raw.param), item=raw.item, last_data=last_data)
-    if raw.type == "policy":
+    if "policy" in raw.type:
         return PolicyRequest(req_id=raw.req_id, type=raw.type, crw_id=raw.crw_id,
-                             file_dir=raw.file_dir, bbs_id=extra.get("bbs_id","0"),
-                             param=PolicyParam(**raw.param), item=raw.item, last_data=last_data)
-    if raw.type == "bill":
+                            file_dir=raw.file_dir, bbs_id=extra.get("bbs_id","0"),
+                            param=PolicyParam(**raw.param), item=raw.item, last_data=last_data)
+    if "bill" in raw.type:
         return ScrapeRequest(req_id=raw.req_id, type=raw.type, crw_id=raw.crw_id,
-                             file_dir=raw.file_dir, param=ScrapeParam(**raw.param),
-                             item=raw.item, last_data=last_data)
+                            file_dir=raw.file_dir, param=ScrapeParam(**raw.param),
+                            item=raw.item, last_data=last_data)
     raise ValueError(f"지원하지 않는 type: '{raw.type}' (bill / policy / prism 중 하나여야 합니다)")
 
 @app.post("/crawl", status_code=202)

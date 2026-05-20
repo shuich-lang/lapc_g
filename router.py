@@ -154,7 +154,7 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
         return JSONResponse(status_code=200, content={"ok": False, "message": "[type] 파라미터는 필수입니다."})
 
     try:
-        if req_type == "bill":
+        if "bill" in req_type:   
             raw = UnifiedRequest(**json_data)
             req_obj = _route_request(raw)          # ScrapeRequest 반환
             await create_job(req_obj.req_id)
@@ -171,7 +171,7 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_minutes_job, req_obj)
 
-        elif req_type == "policy":
+        elif "policy" in req_type:
             raw = UnifiedRequest(**json_data)
             req_obj = _route_request(raw)
             await create_job(req_obj.req_id)
@@ -182,7 +182,7 @@ async def integrated_crawl_api(request: Request, background_tasks: BackgroundTas
             await create_job(req_obj.req_id)
             background_tasks.add_task(run_spch_job, req_obj)
 
-        elif req_type == "prism":
+        elif "prism" in req_type:
             raw = UnifiedRequest(**json_data)
             req_obj = _route_request(raw)
             await create_job(req_obj.req_id)
@@ -223,12 +223,12 @@ async def integrated_crawl_test_api(request: Request):
         return JSONResponse(status_code=200, content={"ok": False, "message": "[type] 파라미터는 필수입니다."})
 
     try:
-        if req_type == "bill":
+        if "bill" in req_type:   
             raw = UnifiedRequest(**json_data)
             req_obj = _route_request(raw)
             return await execute_bill_scraping_test(req_obj)
 
-        elif req_type == "policy":
+        elif "policy" in req_type:
             raw = UnifiedRequest(**json_data)
             req_obj = _route_request(raw)
             return await execute_policy_scraping_test(req_obj)
@@ -244,7 +244,7 @@ async def integrated_crawl_test_api(request: Request):
             crawl_response = await crawl_spch_regex_check(req_obj, crawl_all=False)
             return build_spch_callback_payload(req_obj, crawl_response)
         
-        elif req_type == "prism":
+        elif "prism" in req_type:
             raw = UnifiedRequest(**json_data)
             req_obj = _route_request(raw)
             return await execute_prism_scraping_test(req_obj)
