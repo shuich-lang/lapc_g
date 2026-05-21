@@ -1731,6 +1731,7 @@ async def execute_prism_scraping(req: PrismRequest):
 
 async def execute_prism_scraping_test(req: PrismRequest):
     p = req.param; view_data=[]
+ 
     if p.list_api_url:
         list_data, _, _ = await _fetch_prism_list_api(p.list_url, p.list_api_url, "1", timeout=int(p.timeout))
     else:
@@ -1743,28 +1744,33 @@ async def execute_prism_scraping_test(req: PrismRequest):
             except Exception as e:
                 print(f"[PRISM TEST] 에러: {e}", flush=True); list_data=[]
             finally: await browser.close()
+ 
     if not list_data:
         return {"req_id":req.req_id,"type":req.type,"crw_id":req.crw_id,"file_dir":req.file_dir,"data":[]}
-
+ 
     item       = list_data[0]
     vid        = item.get("view_id")
     target_url = item.get("link_href","")
+    list_title = item.get("BI_SJ","")
     seq_id     = f"CLIKC{str(time.time_ns())[:16]}"
     year       = str(datetime.now().year)
-
+ 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page    = await browser.new_page()
         await page.set_extra_http_headers({"User-Agent": USER_AGENT})
         try:
+            print(f"[PRISM TEST] 상세 수집: {vid}", flush=True)
             await page.goto(target_url, wait_until="domcontentloaded", timeout=int(p.timeout))
             try: await page.wait_for_selector("div.file_list", timeout=int(p.timeout))
             except Exception: await page.wait_for_timeout(5000)
+ 
             el          = await page.query_selector("div.contents_area")
             detail_html = await el.inner_html() if el else ""
-            detail      = _parse_prism_detail(detail_html)
+            detail      = _parse_prism_detail(detail_html, list_title=list_title)
             year        = detail.get("RSRC_YEAR") or year
             file_result = {}
+ 
             if detail_html:
                 parsed_u = urlparse(target_url); base_url = f"{parsed_u.scheme}://{parsed_u.netloc}"
                 try:
@@ -1772,10 +1778,16 @@ async def execute_prism_scraping_test(req: PrismRequest):
                         page, "div.contents_area", base_url, req, seq_id, year, items=req.item)
                 except Exception as e:
                     print(f"    [!] 첨부파일 실패: {str(e)[:100]}", flush=True)
-        finally: await browser.close()
-
-    detail.update({k: file_result.get(k,"") for k in ("ORIGNL_FILE_NM","SYS_FILE_NM","FILE_SEQ","RPRT_TYPE")})
-    view_data.append({"view_id":vid,"URL":target_url,"SEQ":seq_id,"BBS_ID":req.bbs_id,**detail})
+ 
+            detail.update({k: file_result.get(k,"") for k in ("ORIGNL_FILE_NM","SYS_FILE_NM","FILE_SEQ","RPRT_TYPE")})
+            view_data.append({"view_id":vid,"URL":target_url,"SEQ":seq_id,"BBS_ID":req.bbs_id,**detail})
+ 
+        except Exception as e:
+            print(f"[PRISM TEST] 상세 에러: {e}", flush=True)
+            view_data.append({"view_id":vid,"URL":target_url,"view_error":str(e)})
+        finally:
+            await browser.close()
+ 
     view_data.reverse()
     return {"req_id":req.req_id,"type":req.type,"crw_id":req.crw_id,"file_dir":req.file_dir,"data":view_data}
 
